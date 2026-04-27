@@ -341,7 +341,7 @@ function exportRubyMap() {
   // TILES — only emit if the manifest has entries
   const manifest    = state.manifest    || {};
   const customTiles = state.customTiles || {};
-  const manifestIds = Object.keys(manifest).filter(id => (manifest[id] || 0) > 0);
+  const manifestIds = Object.keys(manifest).filter(id => manifest[id] === null || manifest[id] > 0);
   if (manifestIds.length > 0) {
     // Sort: numeric IDs first (ascending), then X-ids, then others
     manifestIds.sort((a, b) => {
@@ -355,12 +355,17 @@ function exportRubyMap() {
     });
     out += `TILES = {\n`;
     for (const id of manifestIds) {
-      const count  = manifest[id];
+      const rawCount = manifest[id];
+      // null = unlimited in UI → tobymao 'unlimited' string
+      const count = rawCount === null ? "'unlimited'" : rawCount;
       const custom = customTiles[id];
       if (custom) {
-        // Round-trip custom tile definition
-        const code = (custom.code || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-        out += `  '${id}' => { 'count' => ${count}, 'color' => '${custom.color}', 'code' => '${code}' },\n`;
+        // Derive color + DSL code from the hex model ({ count, hex: model }).
+        const model = custom.hex || {};
+        // tobymao uses 'grey' (not 'gray') in TILES color fields
+        const color = (model.bg === 'gray' ? 'grey' : model.bg) || 'yellow';
+        const code = (window.staticHexCode(model) || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+        out += `  '${id}' => { 'count' => ${count}, 'color' => '${color}', 'code' => '${code}' },\n`;
       } else {
         out += `  '${id}' => ${count},\n`;
       }

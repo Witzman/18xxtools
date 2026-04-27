@@ -6,7 +6,7 @@
 //   { coord, severity: 'error'|'warning'|'info', message }
 //
 // Usage: validateMapState() → [{ coord, severity, message }, ...]
-// v=20260421a
+// v=20260426a
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -80,7 +80,7 @@ _addCheck(function checkOffboardCityRevenue(coord, hex) {
 // are unusual and may indicate a data entry mistake.
 _addCheck(function checkOOSlots(coord, hex) {
   if (!hex.static || hex.killed) return [];
-  if (hex.feature !== 'oo') return [];
+  if (hex.nodes?.filter(n => n.type === 'city').length !== 2) return [];
   const cities = (hex.nodes || []).filter(n => n.type === 'city');
   if (cities.length === 2) {
     const s0 = cities[0].slots ?? 1;

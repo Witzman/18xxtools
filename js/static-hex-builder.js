@@ -148,6 +148,7 @@ let _mousePos       = { x: 0, y: 0 };
 let _highlightSnap  = null;  // locStr of currently highlighted snap pos
 let _hoveredEdge    = null;  // edge index (0-5) currently under mouse
 let _edgeLane       = {};    // edge → active lane cursor (0-indexed).  "+/-" advances/retreats it.
+let _nodeEdgeLane   = {};    // {nodeId: {edgeIndex: laneCount}}  — parallel tracks on node stubs (≥2 = multi-lane)
 let _showManifest   = false;
 let _manifestId     = '';
 let _manifestCount  = 1;
@@ -173,6 +174,7 @@ function _reset(hexId) {
   _mousePos = { x: 0, y: 0 };
   _highlightSnap = null;
   _edgeLane = {};
+  _nodeEdgeLane = {};
   _showManifest = false;
   _manifestId = '';
   _manifestCount = 1;
@@ -209,7 +211,7 @@ function _loadFromModel(h) {
     const hasPhaseRev = sn.flat === null || sn.flat === undefined
       ? Object.values(sn.phaseRevenue || {}).some(v => v > 0)
       : false;
-    const nodeType = sn.type; // keep junction as 'junction' — renderer handles it natively
+    const nodeType = sn.originalType || sn.type; // originalType preserves 'offboard' across save/reload
     _nodes.push({
       id:           nodeId,
       type:         nodeType,
@@ -270,13 +272,23 @@ function _loadFromModel(h) {
       const nodeId = nodeIdByIndex[p.b.n];
       if (nodeId !== undefined) {
         const edges = _nodeEdges[nodeId];
-        if (!edges.includes(p.a.n)) edges.push(p.a.n);
+        // Handle both aLane:[N,i] (new expanded format) and lanes:N (old compact format)
+        const totalLanes = Array.isArray(p.aLane) ? p.aLane[0] : (p.lanes || 1);
+        if (!edges.includes(p.a.n)) {
+          edges.push(p.a.n);
+          if (totalLanes > 1) { if (!_nodeEdgeLane[nodeId]) _nodeEdgeLane[nodeId] = {}; _nodeEdgeLane[nodeId][p.a.n] = totalLanes; }
+        }
       }
     } else if (aNode && bEdge) {
       const nodeId = nodeIdByIndex[p.a.n];
       if (nodeId !== undefined) {
         const edges = _nodeEdges[nodeId];
-        if (!edges.includes(p.b.n)) edges.push(p.b.n);
+        // Handle both bLane:[N,i] (new expanded format) and lanes:N (old compact format)
+        const totalLanes = Array.isArray(p.bLane) ? p.bLane[0] : (p.lanes || 1);
+        if (!edges.includes(p.b.n)) {
+          edges.push(p.b.n);
+          if (totalLanes > 1) { if (!_nodeEdgeLane[nodeId]) _nodeEdgeLane[nodeId] = {}; _nodeEdgeLane[nodeId][p.b.n] = totalLanes; }
+        }
       }
     } else if (aNode && bNode) {
       // Node-to-node path (e.g. Swansea city↔town)
@@ -321,19 +333,29 @@ function _toDslHex() {
   // Build nodes[] and paths[] that hexToSvgInner understands.
   // Path endpoint convention: { type:'edge'|'node', n:int }
   const nodes = _nodes.map(n => ({
-    type:   n.type === 'offboard' ? 'city' : n.type,
+    type:   n.type,
     slots:  n.slots  || 1,
     locStr: n.locStr || 'center',
   }));
 
   const paths = [];
 
-  // Edge-to-node paths
+  // Edge-to-node paths — expand multi-lane stubs into N paths with aLane+bLane offsets
+  // so hexToSvgInner renders truly parallel tracks (matching tobymao Path.make_lanes:
+  // for edge→node bLane=[N,i], same index as aLane — NOT reversed like edge→edge).
   _nodes.forEach((node, ni) => {
     const edges = _nodeEdges[node.id] || [];
+    const terminal = node.terminal ? 1 : undefined;
     edges.forEach(edge => {
-      paths.push({ a: { type: 'edge', n: edge }, b: { type: 'node', n: ni },
-                   terminal: (node.terminal && node.type === 'offboard') ? 1 : undefined });
+      const lc = (_nodeEdgeLane[node.id] || {})[edge] || 1;
+      if (lc > 1) {
+        for (let i = 0; i < lc; i++) {
+          paths.push({ a: { type: 'edge', n: edge }, b: { type: 'node', n: ni },
+                       aLane: [lc, i], bLane: [lc, i], terminal });
+        }
+      } else {
+        paths.push({ a: { type: 'edge', n: edge }, b: { type: 'node', n: ni }, terminal });
+      }
     });
   });
 
@@ -351,7 +373,7 @@ function _toDslHex() {
   // hexToSvgInner requires that expanded form to draw parallel tracks.
   // For convergent single-lane paths (P9 pattern), assign aLane/bLane offsets so
   // parallel tracks are drawn at shared endpoint edges.
-  // (Note: _buildFinalModel stores the compact `lanes:N` form for saving.)
+  // (_buildFinalModel also expands to N aLane:[N,i] paths, so placed hex renders correctly.)
 
   // Build per-edge max explicit lane value (0-indexed; total = max + 1)
   const _rEdgeMax = {};
@@ -427,17 +449,8 @@ function _toDslHex() {
   // blankPaths for DSL
   const blankPaths = _segments.map(s => [s.ea, s.eb]);
 
-  // Derive feature
-  const cityNodes    = _nodes.filter(n => n.type === 'city');
-  const townNodes    = _nodes.filter(n => n.type === 'town');
-  const offNodes     = _nodes.filter(n => n.type === 'offboard');
-  let feature = 'none';
-  if      (offNodes.length)           feature = 'offboard';
-  else if (cityNodes.length >= 3)     feature = 'm';
-  else if (cityNodes.length === 2)    feature = 'oo';
-  else if (cityNodes.length === 1)    feature = 'city';
-  else if (townNodes.length >= 2)     feature = 'dualTown';
-  else if (townNodes.length === 1)    feature = 'town';
+  // 'offboard' is the only feature value the renderer and exporter branch on.
+  const feature = _nodes.some(n => n.type === 'offboard') ? 'offboard' : 'none';
 
   return { nodes, paths, exits, blankPaths, feature, bg: _bg };
 }
@@ -445,17 +458,8 @@ function _toDslHex() {
 // ── Final model builder ───────────────────────────────────────────────────────
 
 function _buildFinalModel() {
-  const cityNodes = _nodes.filter(n => n.type === 'city');
-  const townNodes = _nodes.filter(n => n.type === 'town');
-  const offNodes  = _nodes.filter(n => n.type === 'offboard');
-
-  let feature = 'none';
-  if      (offNodes.length)         feature = 'offboard';
-  else if (cityNodes.length >= 3)   feature = 'm';
-  else if (cityNodes.length === 2)  feature = 'oo';
-  else if (cityNodes.length === 1)  feature = 'city';
-  else if (townNodes.length >= 2)   feature = 'dualTown';
-  else if (townNodes.length === 1)  feature = 'town';
+  // 'offboard' is the only feature value the renderer and exporter branch on.
+  const feature = _nodes.some(n => n.type === 'offboard') ? 'offboard' : 'none';
 
   const exitSet = new Set();
   _nodes.forEach(node => (_nodeEdges[node.id] || []).forEach(e => exitSet.add(e)));
@@ -467,14 +471,13 @@ function _buildFinalModel() {
   // bypass-segment edges when both exist on the same hex.
   const exitPairs = _nodes.map(n => _nodeEdges[n.id] || []);
 
-  // nodes[] — rich format; type is renderer-safe ('city' for offboard).
-  // originalType carries 'offboard' so staticHexCode can emit the right directive.
+  // nodes[] — rich format; type is stored as-is ('offboard' stays 'offboard').
+  // originalType kept as fallback for old saves that stored 'city' with originalType:'offboard'.
   // Revenue uses the same field names as parseDslHex: flat (non-phase) / phaseRevenue.
   const nodes = _nodes.map(n => {
     const isPhase = n.phaseMode || n.type === 'offboard';
     return {
-      type:         n.type === 'offboard' ? 'city' : n.type,
-      originalType: n.type,
+      type:         n.type,
       slots:        n.slots  || 1,
       locStr:       n.locStr || 'center',
       flat:         isPhase ? null : (n.revenue || 0),
@@ -487,14 +490,23 @@ function _buildFinalModel() {
   });
 
   // paths[] — edge-to-node, node-to-node (Wien, Swansea), and edge-to-edge bypass
+  // Edge-to-node multi-lane stubs are expanded to N separate paths with aLane:[N,i],
+  // exactly as _toDslHex does, so hexToSvgInner can render parallel tracks on the map.
   const paths = [];
   _nodes.forEach((node, ni) => {
     (_nodeEdges[node.id] || []).forEach(edge => {
-      paths.push({
-        a:        { type: 'edge', n: edge },
-        b:        { type: 'node', n: ni },
-        terminal: (node.terminal && node.type === 'offboard') ? 1 : undefined,
-      });
+      const lc = (_nodeEdgeLane[node.id] || {})[edge] || 1;
+      const terminal = node.terminal ? 1 : undefined;
+      if (lc > 1) {
+        // Mirror tobymao Path.make_lanes: for edge→node, bLane=[N,i] (same index as aLane,
+        // NOT reversed — reversal only applies to edge→edge paths).
+        for (let i = 0; i < lc; i++) {
+          paths.push({ a: { type: 'edge', n: edge }, b: { type: 'node', n: ni },
+                       aLane: [lc, i], bLane: [lc, i], terminal });
+        }
+      } else {
+        paths.push({ a: { type: 'edge', n: edge }, b: { type: 'node', n: ni }, terminal });
+      }
     });
   });
   _nodePaths.forEach(np => {
@@ -522,14 +534,8 @@ function _buildFinalModel() {
 
   const p0 = _nodes[0];
 
-  // Phase revenue is driven entirely by node.phaseMode — not by tile color.
-  const usesPhaseRev =
-    feature === 'offboard' ||
-    (feature === 'city'     && cityNodes.some(n => n.phaseMode))  ||
-    (feature === 'town'     && (townNodes[0]?.phaseMode || false)) ||
-    (feature === 'dualTown' && townNodes.some(t => t.phaseMode))  ||
-    (feature === 'oo'       && cityNodes.some(n => n.phaseMode))  ||
-    (feature === 'm'        && cityNodes.some(n => n.phaseMode));
+  // Phase revenue is active if any node has phaseMode, or any offboard is present.
+  const usesPhaseRev = _nodes.some(n => n.type === 'offboard' || n.phaseMode);
   const phaseRevenue = usesPhaseRev
     ? (p0?.phaseRevenue && Object.keys(p0.phaseRevenue).length ? { ...p0.phaseRevenue } : { yellow: 20, green: 30, brown: 40, gray: 60 })
     : {};
@@ -541,8 +547,6 @@ function _buildFinalModel() {
     static:         true,
     bg:             _bg,
     feature,
-    slots:          cityNodes.length === 1 ? (cityNodes[0].slots || 1) : undefined,
-    ooSlots:        cityNodes.length >= 2  ? cityNodes.map(c => c.slots || 1) : undefined,
     exits,
     exitPairs,
     nodes,
@@ -553,9 +557,6 @@ function _buildFinalModel() {
     taperStyle:     1,
     pathMode:       'star',
     pathPairs:      [],
-    townRevenue:    townNodes[0]?.revenue ?? 10,
-    townRevenues:   townNodes.map(t => t.revenue || 10),
-    cityRevenues:   cityNodes.map(c => c.revenue || 20),
     phaseRevenue,
     activePhases,
     label:          _label,
@@ -571,6 +572,10 @@ function _buildFinalModel() {
 function _save() {
   if (!_hexId) return;
   const model = _buildFinalModel();
+  window.HBD?.log('save', `Saved hex ${_hexId}`, {
+    feature: model.feature, bg: model.bg,
+    nodes: model.nodes?.length, paths: model.paths?.length, exits: model.exits,
+  });
   ensureHex(_hexId);
   Object.assign(state.hexes[_hexId], model);
   if (typeof updateHexPanel === 'function') updateHexPanel(_hexId);
@@ -585,6 +590,8 @@ window.openHexBuilder = function (hexId) {
   const el = document.getElementById('hexBuilder');
   if (el) { el.style.display = 'flex'; }
   _buildPanel();
+  window.HBD?.log('state', `Builder opened for hex ${hexId}`,
+    { nodes: _nodes.length, segs: _segments.length, bg: _bg, tool: _activeTool });
 };
 
 // Backward-compatibility alias
@@ -593,6 +600,7 @@ window.openStaticHexWizard = window.openHexBuilder;
 function _close() {
   const el = document.getElementById('hexBuilder');
   if (el) el.style.display = 'none';
+  window.HBD?.log('state', 'Builder closed');
 }
 
 // ── Next manifest ID helper ───────────────────────────────────────────────────
@@ -637,6 +645,10 @@ function _panelHtml() {
   return `
     <div class="hb-titlebar">
       <span class="hb-title">Hex Builder <span class="hb-hexid">${hexLabel}</span></span>
+      <div class="hb-debug-tip">
+        <button id="hbDebugBtn" class="hb-debug-btn" aria-label="Open debug logger">ℹ</button>
+        <div class="hb-debug-tooltip">Build not rendering right?<br>Click to open the debug logger.</div>
+      </div>
       <button class="hb-close" id="hbClose" title="Close">&#x2715;</button>
     </div>
 
@@ -1139,6 +1151,15 @@ function _nearestSnap(mx, my) {
 // ── Panel event binding ───────────────────────────────────────────────────────
 
 function _bindPanel() {
+  // Debug logger toggle
+  const debugBtn = document.getElementById('hbDebugBtn');
+  if (debugBtn) debugBtn.onclick = () => {
+    window.HBD?.toggle();
+    // Pulse the button to confirm the action
+    debugBtn.classList.add('hb-debug-btn--active');
+    setTimeout(() => debugBtn.classList.remove('hb-debug-btn--active'), 600);
+  };
+
   // Close
   const closeBtn = document.getElementById('hbClose');
   if (closeBtn) closeBtn.onclick = _close;
@@ -1167,7 +1188,9 @@ function _bindPanel() {
   if (rail) rail.addEventListener('click', e => {
     const btn = e.target.closest('[data-bg]');
     if (!btn) return;
+    const prev = _bg;
     _bg = btn.dataset.bg;
+    window.HBD?.log('state', `BG color: ${prev} → ${_bg}`);
     // Rebuild panel (bg change affects toolbar, node config, etc.)
     _buildPanel();
   });
@@ -1177,8 +1200,10 @@ function _bindPanel() {
   if (toolbar) toolbar.addEventListener('click', e => {
     const btn = e.target.closest('[data-tool]');
     if (!btn) return;
+    const prevTool = _activeTool;
     _activeTool = btn.dataset.tool;
     _pendingEdge = null;
+    if (_activeTool !== prevTool) window.HBD?.log('state', `Tool: ${prevTool} → ${_activeTool}`);
     _refreshToolbar();
     _renderCanvas();
   });
@@ -1289,12 +1314,17 @@ function _bindNodeConfig() {
     const node = _nodes.find(n => n.id === _selectedNodeId);
     if (!node) return;
     if (e.target.id === 'hbRevenue') {
+      const prev = node.revenue;
       node.revenue = parseInt(e.target.value) || 0;
+      window.HBD?.log('node', `Node ${node.id} revenue: ${prev} → ${node.revenue}`);
       _updateDslPreview();
     }
     if (e.target.dataset.phase) {
       if (!node.phaseRevenue) node.phaseRevenue = {};
-      node.phaseRevenue[e.target.dataset.phase] = parseInt(e.target.value) || 0;
+      const ph = e.target.dataset.phase;
+      const prev = node.phaseRevenue[ph];
+      node.phaseRevenue[ph] = parseInt(e.target.value) || 0;
+      window.HBD?.log('node', `Node ${node.id} phaseRevenue.${ph}: ${prev} → ${node.phaseRevenue[ph]}`);
       _updateDslPreview();
     }
   });
@@ -1304,10 +1334,12 @@ function _bindNodeConfig() {
     if (!node) return;
     if (e.target.id === 'hbPhaseMode') {
       node.phaseMode = e.target.checked;
+      window.HBD?.log('node', `Node ${node.id} phaseMode → ${node.phaseMode}`);
       _refreshNodeConfig();
     }
     if (e.target.id === 'hbTerminal') {
       node.terminal = e.target.checked;
+      window.HBD?.log('node', `Node ${node.id} terminal → ${node.terminal}`);
       _updateDslPreview();
     }
   });
@@ -1317,7 +1349,9 @@ function _bindNodeConfig() {
     if (!slotBtn) return;
     const node = _nodes.find(n => n.id === _selectedNodeId);
     if (!node) return;
+    const prev = node.slots;
     node.slots = parseInt(slotBtn.dataset.slots);
+    window.HBD?.log('node', `Node ${node.id} slots: ${prev} → ${node.slots} (via slot btn)`);
     _refreshNodeConfig();
     _renderCanvas();
     _updateDslPreview();
@@ -1350,6 +1384,12 @@ function _bindManifestForm() {
     const model = { ...(_buildFinalModel()), label };
     state.customTiles = state.customTiles || {};
     state.customTiles[id] = { count, hex: model };
+    // Also register in the tile manifest so it appears in the Tile Manifest view.
+    // Preserve an existing count (user may have edited it there) but always write
+    // the tile def so a re-save reflects the latest build.
+    state.manifest = state.manifest || {};
+    if (!(id in state.manifest)) state.manifest[id] = count;
+    autosave();
     // Visual feedback
     saveBtn.textContent = 'Saved ✓';
     setTimeout(() => { saveBtn.textContent = 'Save to Manifest'; }, 1500);
@@ -1444,7 +1484,8 @@ function _nodeAtPoint(mx, my) {
   for (const node of _nodes) {
     const snap = SNAP_POSITIONS.find(sp => sp.locStr === node.locStr);
     if (!snap) continue;
-    if (Math.hypot(p.x - snap.x, p.y - snap.y) <= NODE_HIT_R) return node;
+    const d = Math.hypot(p.x - snap.x, p.y - snap.y);
+    if (d <= NODE_HIT_R) return node;
   }
   return null;
 }
@@ -1454,12 +1495,17 @@ function _onCanvasClick(e) {
   const mx = e.clientX - rect.left;
   const my = e.clientY - rect.top;
 
+  window.HBD?.log('click', `(${mx.toFixed(0)},${my.toFixed(0)}) tool=${_activeTool} pendingEdge=${_pendingEdge} pendingNode=${_pendingNode}`,
+    { tgt: e.target.tagName + (e.target.id ? '#'+e.target.id : ''), ds: JSON.stringify(e.target.dataset||{}) });
+
   if (_activeTool === 'erase') {
     const clickedEdge = _edgeAtPoint(mx, my);
     if (clickedEdge !== null) {
+      window.HBD?.log('hit', `ERASE edge=${clickedEdge}`);
       _segments = _segments.filter(s => s.ea !== clickedEdge && s.eb !== clickedEdge);
       _nodes.forEach(n => {
         _nodeEdges[n.id] = (_nodeEdges[n.id] || []).filter(e => e !== clickedEdge);
+        if (_nodeEdgeLane[n.id]) delete _nodeEdgeLane[n.id][clickedEdge];
       });
       // Reset cursor to 0 for any edge that now has no segments — prevents stale
       // lane values bleeding into the next fresh draw through that edge.
@@ -1467,6 +1513,7 @@ function _onCanvasClick(e) {
         _edgeLane[clickedEdge] = 0;
       }
     } else {
+      window.HBD?.log('hit', 'ERASE no edge — trying node/seg midpoint');
       _handleErase(mx, my);
     }
     _renderCanvas();
@@ -1482,14 +1529,18 @@ function _onCanvasClick(e) {
     const minusEdge = e.target.dataset.edgeMinus;
     if (plusEdge !== undefined) {
       const edge = parseInt(plusEdge);
-      _edgeLane[edge] = Math.min(3, (_edgeLane[edge] || 0) + 1);  // max lane index = 3 (4 lanes)
+      const prev = _edgeLane[edge] || 0;
+      _edgeLane[edge] = Math.min(3, prev + 1);  // max lane index = 3 (4 lanes)
+      window.HBD?.log('lane', `edge ${edge} lane+ : ${prev} → ${_edgeLane[edge]}`);
       _renderCanvas();
       _updateDslPreview();
       return;
     }
     if (minusEdge !== undefined) {
       const edge = parseInt(minusEdge);
-      _edgeLane[edge] = Math.max(0, (_edgeLane[edge] || 0) - 1);
+      const prev = _edgeLane[edge] || 0;
+      _edgeLane[edge] = Math.max(0, prev - 1);
+      window.HBD?.log('lane', `edge ${edge} lane- : ${prev} → ${_edgeLane[edge]}`);
       _renderCanvas();
       _updateDslPreview();
       return;
@@ -1501,17 +1552,30 @@ function _onCanvasClick(e) {
   // takes priority over placing new track.
   {
     const p2 = _unrotate(mx, my);
+    let _badgeHit = false;
     for (const seg of _segments) {
       const [ax, ay] = EMP[seg.ea];
       const [bx, by] = EMP[seg.eb];
       const smx = (ax + bx) / 2, smy = (ay + by) / 2;
-      if (Math.hypot(p2.x - smx, p2.y - smy) <= 12) {
+      const _bd = Math.hypot(p2.x - smx, p2.y - smy);
+      if (_bd <= 12) {
         // Cycle lanes 1→2→3→4→1
-        seg.lanes = ((seg.lanes || 1) % 4) + 1;
+        const prev = seg.lanes || 1;
+        seg.lanes = (prev % 4) + 1;
+        window.HBD?.log('lane', `badge seg(${seg.ea}↔${seg.eb}) lanes: ${prev} → ${seg.lanes}`, { dist: _bd.toFixed(1) });
+        _badgeHit = true;
         _renderCanvas();
         _updateDslPreview();
         return;
       }
+    }
+    if (!_badgeHit && _segments.length) {
+      // Log near-miss distances to help diagnose hit-area problems
+      const _dists = _segments.map(seg => {
+        const [ax,ay] = EMP[seg.ea], [bx,by] = EMP[seg.eb];
+        return { seg: `${seg.ea}↔${seg.eb}`, d: Math.hypot(p2.x-(ax+bx)/2, p2.y-(ay+by)/2).toFixed(1) };
+      });
+      window.HBD?.log('hit', 'badge: no hit', _dists);
     }
   }
 
@@ -1523,19 +1587,29 @@ function _onCanvasClick(e) {
     const clickedNode = _nodeAtPoint(mx, my);
     const clickedEdge = _edgeAtPoint(mx, my);
 
+    window.HBD?.log('hit', `TRACK probe: node=${clickedNode ? clickedNode.id+'('+clickedNode.locStr+')' : 'none'} edge=${clickedEdge}`,
+      { pendingNode: _pendingNode, nodes: _nodes.map(n=>({id:n.id,loc:n.locStr,type:n.type})) });
+
     if (_pendingNode === null) {
-      if (clickedNode) {
-        // First click hit a node — enter pending mode
+      if (clickedNode && _pendingEdge === null) {
+        // First click hit a node with no pending edge — enter node-pending mode.
+        // If _pendingEdge is set, fall through so the edge→node connection logic handles it.
+        window.HBD?.log('state', `TRACK: pending → node ${clickedNode.id} (${clickedNode.locStr})`);
         _pendingNode = clickedNode.id;
-        _pendingEdge = null;
         _renderCanvas();
         return;
       }
-      // No node hit — fall through to normal edge/snap handling below
+      // No node hit, or a pending edge takes priority — fall through to edge/snap handling
+      if (clickedNode && _pendingEdge !== null) {
+        window.HBD?.log('hit', `TRACK: node hit but pendingEdge=${_pendingEdge} — falling through to connect`);
+      } else {
+        window.HBD?.log('hit', 'TRACK: no node hit — falling through to edge/snap');
+      }
     } else {
       // Second click with a pending node
       if (clickedNode && clickedNode.id === _pendingNode) {
         // Same node — cancel
+        window.HBD?.log('state', `TRACK: same node ${_pendingNode} — cancel pending`);
         _pendingNode = null;
         _renderCanvas();
         return;
@@ -1547,19 +1621,40 @@ function _onCanvasClick(e) {
           (np.nodeAId === niA && np.nodeBId === niB) ||
           (np.nodeAId === niB && np.nodeBId === niA)
         );
-        if (xi >= 0) _nodePaths.splice(xi, 1);
-        else _nodePaths.push({ id: _nextId(), nodeAId: niA, nodeBId: niB });
+        if (xi >= 0) {
+          window.HBD?.log('path', `nodePath REMOVED: ${niA}↔${niB}`);
+          _nodePaths.splice(xi, 1);
+        } else {
+          window.HBD?.log('path', `nodePath ADDED: ${niA}↔${niB}`);
+          _nodePaths.push({ id: _nextId(), nodeAId: niA, nodeBId: niB });
+        }
         _pendingNode = null;
         _renderCanvas();
         _updateDslPreview();
         return;
       }
       if (clickedEdge !== null) {
-        // Node → Edge: toggle stub from edge into pending node
+        // Node → Edge: add stub, or update lane count if it already exists.
+        // Use the Erase tool to remove stubs.
         const edges = _nodeEdges[_pendingNode] || [];
         const idx = edges.indexOf(clickedEdge);
-        if (idx >= 0) edges.splice(idx, 1);
-        else edges.push(clickedEdge);
+        const lc = (_edgeLane[clickedEdge] || 0) + 1;
+        if (idx >= 0) {
+          // Stub already exists — update lane count if cursor changed, otherwise no-op
+          const existingLc = (_nodeEdgeLane[_pendingNode] || {})[clickedEdge] || 1;
+          if (lc !== existingLc) {
+            if (!_nodeEdgeLane[_pendingNode]) _nodeEdgeLane[_pendingNode] = {};
+            if (lc > 1) _nodeEdgeLane[_pendingNode][clickedEdge] = lc;
+            else delete _nodeEdgeLane[_pendingNode][clickedEdge];
+            window.HBD?.log('seg', `stub UPDATED: node ${_pendingNode} ← edge ${clickedEdge}`, { lanes: `${existingLc}→${lc}` });
+          } else {
+            window.HBD?.log('seg', `stub no-op: node ${_pendingNode} ← edge ${clickedEdge} already lanes=${lc}`);
+          }
+        } else {
+          edges.push(clickedEdge);
+          if (lc > 1) { if (!_nodeEdgeLane[_pendingNode]) _nodeEdgeLane[_pendingNode] = {}; _nodeEdgeLane[_pendingNode][clickedEdge] = lc; }
+          window.HBD?.log('seg', `stub ADDED: node ${_pendingNode} ← edge ${clickedEdge}`, { lanes: lc, edgesNow: [...edges] });
+        }
         _nodeEdges[_pendingNode] = edges;
         _pendingNode = null;
         _renderCanvas();
@@ -1567,6 +1662,7 @@ function _onCanvasClick(e) {
         return;
       }
       // Missed everything — cancel
+      window.HBD?.log('hit', `TRACK: second click missed everything — cancel pending node ${_pendingNode}`);
       _pendingNode = null;
       _renderCanvas();
       return;
@@ -1579,12 +1675,14 @@ function _onCanvasClick(e) {
   if (clickedEdge !== null) {
     if (_pendingEdge === null) {
       // First endpoint — set pending, deselect node config
+      window.HBD?.log('hit', `Edge ${clickedEdge} → pending (first endpoint)`);
       _pendingEdge = clickedEdge;
       _selectedNodeId = null;
       _refreshNodeConfig();
       _renderCanvas();
     } else if (_pendingEdge === clickedEdge) {
       // Same edge — cancel
+      window.HBD?.log('state', `Edge ${clickedEdge} again — cancel pendingEdge`);
       _pendingEdge = null;
       _renderCanvas();
     } else {
@@ -1592,40 +1690,70 @@ function _onCanvasClick(e) {
       const ea = _pendingEdge, eb = clickedEdge;
       _pendingEdge = null;
       const xi = _segments.findIndex(s => (s.ea===ea&&s.eb===eb)||(s.ea===eb&&s.eb===ea));
-      if (xi >= 0) _segments.splice(xi, 1);
-      else _segments.push({ id: _nextId(), ea, eb,
-        laneA: _edgeLane[ea] || 0, laneB: _edgeLane[eb] || 0 });
+      if (xi >= 0) {
+        window.HBD?.log('seg', `bypass REMOVED: ${ea}↔${eb}`);
+        _segments.splice(xi, 1);
+      } else {
+        const lA = _edgeLane[ea] || 0, lB = _edgeLane[eb] || 0;
+        window.HBD?.log('seg', `bypass ADDED: ${ea}↔${eb}`, { laneA: lA, laneB: lB, totalSegs: _segments.length + 1 });
+        _segments.push({ id: _nextId(), ea, eb, laneA: lA, laneB: lB });
+      }
       _renderCanvas();
       _updateDslPreview();
     }
     return;
   }
+  window.HBD?.log('hit', 'No edge hit');
 
   // ── Node or snap clicked ──────────────────────────────────────────────────
   const snap = _nearestSnapAt(mx, my);
+  window.HBD?.log('hit', snap ? `Snap hit: ${snap.locStr}` : 'No snap hit');
 
   if (_pendingEdge !== null) {
     // Completing a connection to a node or snap
     if (snap) {
       const existing = _nodes.find(n => n.locStr === snap.locStr);
       if (existing) {
-        // Toggle stub: pending edge ↔ existing node
+        // Add stub, or update lane count if it already exists.
+        // Use the Erase tool to remove stubs.
         const edges = _nodeEdges[existing.id] || [];
         const idx = edges.indexOf(_pendingEdge);
-        if (idx >= 0) edges.splice(idx, 1);
-        else edges.push(_pendingEdge);
+        const lc = (_edgeLane[_pendingEdge] || 0) + 1;
+        if (idx >= 0) {
+          // Stub already exists — update lane count if cursor changed, otherwise no-op
+          const existingLc = (_nodeEdgeLane[existing.id] || {})[_pendingEdge] || 1;
+          if (lc !== existingLc) {
+            if (!_nodeEdgeLane[existing.id]) _nodeEdgeLane[existing.id] = {};
+            if (lc > 1) _nodeEdgeLane[existing.id][_pendingEdge] = lc;
+            else delete _nodeEdgeLane[existing.id][_pendingEdge];
+            window.HBD?.log('seg', `stub UPDATED: edge ${_pendingEdge} → node ${existing.id} (${existing.locStr})`, { lanes: `${existingLc}→${lc}` });
+          } else {
+            window.HBD?.log('seg', `stub no-op: edge ${_pendingEdge} → node ${existing.id} already lanes=${lc}`);
+          }
+        } else {
+          edges.push(_pendingEdge);
+          if (lc > 1) { if (!_nodeEdgeLane[existing.id]) _nodeEdgeLane[existing.id] = {}; _nodeEdgeLane[existing.id][_pendingEdge] = lc; }
+          window.HBD?.log('seg', `stub ADDED: edge ${_pendingEdge} → node ${existing.id} (${existing.locStr})`, { lanes: lc, edgesNow: [...edges] });
+        }
         _nodeEdges[existing.id] = edges;
         _selectedNodeId = existing.id;
         _refreshNodeConfig();
       } else {
         // Create node at snap + connect pending edge
+        const lc = (_edgeLane[_pendingEdge] || 0) + 1;
+        window.HBD?.log('node', `CREATE node at ${snap.locStr} + connect edge ${_pendingEdge}`, { lanes: lc });
         const nodeId = _placeNode(snap.locStr);
         if (nodeId !== null) {
           const edges = _nodeEdges[nodeId] || [];
-          if (!edges.includes(_pendingEdge)) edges.push(_pendingEdge);
+          if (!edges.includes(_pendingEdge)) {
+            edges.push(_pendingEdge);
+            if (lc > 1) { if (!_nodeEdgeLane[nodeId]) _nodeEdgeLane[nodeId] = {}; _nodeEdgeLane[nodeId][_pendingEdge] = lc; }
+          }
           _nodeEdges[nodeId] = edges;
         }
       }
+    } else {
+      window.HBD?.log('hit', `pendingEdge ${_pendingEdge}: no snap → edge connection dropped`);
     }
     // Whether we connected or not, clear pending
     _pendingEdge = null;
@@ -1641,26 +1769,32 @@ function _onCanvasClick(e) {
       if (_selectedNodeId === existing.id) {
         // Re-click selected node: cycle city slots, deselect town
         if (existing.type === 'city') {
-          existing.slots = ((existing.slots || 1) % 4) + 1;
+          const prev = existing.slots || 1;
+          existing.slots = (prev % 4) + 1;
+          window.HBD?.log('node', `City slots cycled: ${prev} → ${existing.slots} (node ${existing.id})`);
           _refreshNodeConfig();
           _updateDslPreview();
         } else {
+          window.HBD?.log('node', `Re-click ${existing.type} ${existing.id} → deselect`);
           _selectedNodeId = null;
           _refreshNodeConfig();
         }
       } else {
+        window.HBD?.log('node', `SELECT node ${existing.id} (${existing.type} @ ${existing.locStr})`);
         _selectedNodeId = existing.id;
         _refreshNodeConfig();
       }
       _renderCanvas();
     } else {
       // Empty snap — place new node (unconnected; connect edges after)
+      window.HBD?.log('node', `Place new node at ${snap.locStr} (tool=${_activeTool})`);
       _placeNode(snap.locStr);
     }
     return;
   }
 
   // Click on empty canvas — deselect
+  window.HBD?.log('hit', 'Empty canvas — deselect');
   _selectedNodeId = null;
   _refreshNodeConfig();
   _renderCanvas();
@@ -1695,7 +1829,9 @@ function _placeNode(locStr) {
   if (existing) {
     if (existing.type === 'city') {
       // Increment slots (1→2→3→4→1)
-      existing.slots = ((existing.slots || 1) % 4) + 1;
+      const prev = existing.slots || 1;
+      existing.slots = (prev % 4) + 1;
+      window.HBD?.log('node', `_placeNode: city slots ${prev}→${existing.slots} (id=${existing.id} @ ${locStr})`);
       _selectedNodeId = existing.id;
       _refreshNodeConfig();
       _renderCanvas();
@@ -1704,6 +1840,7 @@ function _placeNode(locStr) {
     }
     if (existing.type === 'town' || existing.type === 'junction') {
       // Toggle — remove town or junction
+      window.HBD?.log('node', `_placeNode: REMOVE ${existing.type} id=${existing.id} @ ${locStr}`);
       _removeNode(existing.id);
       return null;
     }
@@ -1726,6 +1863,7 @@ function _placeNode(locStr) {
   _nodes.push(node);
   _nodeEdges[node.id] = [];
   _selectedNodeId = node.id;
+  window.HBD?.log('node', `_placeNode: NEW ${type} id=${node.id} @ ${locStr}`, { revenue: node.revenue, phaseMode: node.phaseMode });
   _refreshNodeConfig();
   _renderCanvas();
   _updateDslPreview();
@@ -1736,6 +1874,7 @@ function _placeNode(locStr) {
 function _removeNode(nodeId) {
   _nodes = _nodes.filter(n => n.id !== nodeId);
   delete _nodeEdges[nodeId];
+  delete _nodeEdgeLane[nodeId];
   // Remove any node-to-node paths involving this node
   _nodePaths = _nodePaths.filter(np => np.nodeAId !== nodeId && np.nodeBId !== nodeId);
   if (_selectedNodeId === nodeId) _selectedNodeId = null;
@@ -1816,7 +1955,6 @@ window.staticHexCode = function staticHexCode(hex) {
   const savedPaths = hex.paths || [];
 
   // ── Revenue string helper ─────────────────────────────────────────────────
-  // Used for new-format nodes that carry flat / phaseRevenue.
   function nodeRevStr(node) {
     const isPhase = node.phaseMode ||
       (node.phaseRevenue !== null && node.phaseRevenue !== undefined &&
@@ -1829,168 +1967,67 @@ window.staticHexCode = function staticHexCode(hex) {
     return String(node.flat ?? 0);
   }
 
-  // ── Detect node format ────────────────────────────────────────────────────
-  // parseDslHex and new builder saves include 'flat' (possibly null) or a
-  // non-undefined 'phaseRevenue' object.  Old builder saves (pre-rewrite) only
-  // have { type, slots, locStr } — no revenue fields at all.
-  const nodesHaveRevenue = savedNodes.length > 0 && savedNodes.some(n =>
-    n.flat !== undefined ||
-    (n.phaseRevenue !== null && n.phaseRevenue !== undefined) ||
-    n.type === 'junction' ||
-    n.originalType === 'junction'
-  );
-
   // ── Node directives ───────────────────────────────────────────────────────
-  if (nodesHaveRevenue) {
-    // New path: every node carries its own revenue — works for any topology
-    // (single city, OO, Wien's 3×independent cities, offboard, etc.)
-    savedNodes.forEach(node => {
-      const locAttr  = (node.locStr && node.locStr !== 'center') ? `,loc:${node.locStr}` : '';
-      const slotAttr = (node.slots  || 1) > 1 ? `,slots:${node.slots}` : '';
-      const termAttr = node.terminal ? ',terminal:1' : '';
-      const rev      = nodeRevStr(node);
-      // originalType ('offboard'|'city'|'town') is written by new _buildFinalModel.
-      // Older parseDslHex saves don't set it, but they never had type='offboard' in
-      // nodes[] (offboard was stored as type:'city' with hex.feature='offboard').
-      const origType = node.originalType || node.type;
+  savedNodes.forEach(node => {
+    const locAttr  = (node.locStr && node.locStr !== 'center') ? `,loc:${node.locStr}` : '';
+    const slotAttr = (node.slots  || 1) > 1 ? `,slots:${node.slots}` : '';
+    const termAttr = node.terminal ? ',terminal:1' : '';
+    const rev      = nodeRevStr(node);
+    const origType = node.originalType || node.type;
 
-      if      (origType === 'junction') parts.push(`junction`);   // no revenue attr — DSL is just 'junction'
-      else if (origType === 'offboard') parts.push(`offboard=revenue:${rev}${termAttr}${locAttr}`);
-      else if (origType === 'city')     parts.push(`city=revenue:${rev}${slotAttr}${locAttr}`);
-      else if (origType === 'town')     parts.push(`town=revenue:${rev}${locAttr}`);
-    });
-
-  } else {
-    // ── Legacy: old builder saves — nodes[] has no revenue; use feature fields ─
-    const exits    = hex.exits || [];
-    const isPhase  = !!(hex.activePhases && Object.values(hex.activePhases).some(Boolean));
-    const nodeExitCount = (hex.exitPairs || []).reduce((n, arr) => n + (arr||[]).length, 0);
-    const noExits  = hex.exitPairs ? nodeExitCount === 0 : exits.length === 0;
-
-    function phaseRevStr() {
-      const pr     = hex.phaseRevenue || {};
-      const active = PHASES.filter(p => hex.activePhases?.[p]);
-      return active.length ? active.map(p => `${p}_${pr[p]||0}`).join('|') : '0';
-    }
-    function locAttr(i) {
-      const ls = savedNodes[i]?.locStr;
-      return (ls && ls !== 'center') ? `,loc:${ls}` : '';
-    }
-
-    switch (hex.feature) {
-      case 'town': {
-        const hasPhase = Object.keys(hex.phaseRevenue||{}).length && hex.activePhases?.yellow;
-        parts.push(`town=revenue:${noExits?0:(hasPhase?phaseRevStr():(hex.townRevenue??10))}${locAttr(0)}`);
-        break;
-      }
-      case 'dualTown': {
-        const [r0,r1] = hex.townRevenues||[10,10];
-        parts.push(`town=revenue:${noExits?0:r0}${locAttr(0)}`);
-        parts.push(`town=revenue:${noExits?0:r1}${locAttr(1)}`);
-        break;
-      }
-      case 'offboard':
-        parts.push(`offboard=revenue:${isPhase?phaseRevStr():'0'}${locAttr(0)}`);
-        break;
-      case 'oo':
-      case 'c': {
-        const revs = hex.cityRevenues || [20,20];
-        const sl   = hex.ooSlots||[1,1];
-        [0,1].forEach(i => parts.push(`city=revenue:${noExits?0:revs[i]||0}${sl[i]>1?`,slots:${sl[i]}`:''}${locAttr(i)}`));
-        break;
-      }
-      case 'm': {
-        const revs = hex.cityRevenues || [20,20,20];
-        [0,1,2].forEach(i => parts.push(`city=revenue:${noExits?0:revs[i]||0}${locAttr(i)}`));
-        break;
-      }
-      case 'city': {
-        const slots = hex.slots||1;
-        const rev   = isPhase ? phaseRevStr() : (noExits?0:(hex.cityRevenues?.[0]??20));
-        const sl    = slots>1?`,slots:${slots}`:'';
-        parts.push(`city=revenue:${rev}${sl}${locAttr(0)}`);
-        break;
-      }
-      default: break;
-    }
-  }
+    if      (origType === 'junction') parts.push(`junction`);
+    else if (origType === 'offboard') parts.push(`offboard=revenue:${rev}${termAttr}${locAttr}`);
+    else if (origType === 'city')     parts.push(`city=revenue:${rev}${slotAttr}${locAttr}`);
+    else if (origType === 'town')     parts.push(`town=revenue:${rev}${locAttr}`);
+  });
 
   // ── Path directives ───────────────────────────────────────────────────────
-  if (savedPaths.length > 0) {
-    // Edge-to-edge paths need lane-count collapsing.
-    // parseDslHex expands lanes:N into N paths with aLane/bLane — re-group them.
-    // New builder format stores a single path with p.lanes = N — use directly.
-    // Group key: min(ea,eb)-max(ea,eb) to handle both orderings.
-    const eeGroups = new Map();
-    const nonEe    = [];
+  // Edge-to-edge: group by endpoint pair to collapse aLane expansions into lanes:N.
+  const eeGroups = new Map();
+  const nonEe    = [];
 
-    savedPaths.forEach(p => {
-      const aE = p.a?.type === 'edge', bE = p.b?.type === 'edge';
-      if (aE && bE) {
-        const ea = p.a.n, eb = p.b.n;
-        const key = Math.min(ea, eb) + '-' + Math.max(ea, eb);
-        const grp = eeGroups.get(key);
-        if (!grp) {
-          eeGroups.set(key, { ea, eb, lanes: p.lanes || 1 });
-        } else if (p.lanes && p.lanes > grp.lanes) {
-          grp.lanes = p.lanes;    // explicit attribute supersedes count
-        } else if (!p.lanes) {
-          grp.lanes++;            // parseDslHex expansion: another copy = +1 lane
-        }
-      } else {
-        nonEe.push(p);
+  savedPaths.forEach(p => {
+    const aE = p.a?.type === 'edge', bE = p.b?.type === 'edge';
+    if (aE && bE) {
+      const ea = p.a.n, eb = p.b.n;
+      const key = Math.min(ea, eb) + '-' + Math.max(ea, eb);
+      const grp = eeGroups.get(key);
+      if (!grp) {
+        eeGroups.set(key, { ea, eb, lanes: p.lanes || 1 });
+      } else if (p.lanes && p.lanes > grp.lanes) {
+        grp.lanes = p.lanes;
+      } else if (!p.lanes) {
+        grp.lanes++;
       }
-    });
-
-    // Emit edge-to-edge paths (with lanes when > 1)
-    for (const { ea, eb, lanes } of eeGroups.values()) {
-      const lanesAttr = lanes > 1 ? `,lanes:${lanes}` : '';
-      parts.push(`path=a:${(ea + rot) % 6},b:${(eb + rot) % 6}${lanesAttr}`);
-    }
-
-    // Emit all non-edge-to-edge paths (edge-to-node, node-to-node, node-to-edge)
-    nonEe.forEach(p => {
-      const termAttr = p.terminal ? `,terminal:${p.terminal}` : '';
-      const aE = p.a?.type === 'edge', bE = p.b?.type === 'edge';
-      const aN = p.a?.type === 'node', bN = p.b?.type === 'node';
-      if      (aE && bN) parts.push(`path=a:${(p.a.n+rot)%6},b:_${p.b.n}${termAttr}`);
-      else if (aN && bE) parts.push(`path=a:_${p.a.n},b:${(p.b.n+rot)%6}${termAttr}`);
-      else if (aN && bN) parts.push(`path=a:_${p.a.n},b:_${p.b.n}`);
-    });
-
-  } else {
-    // ── Legacy: very old saves with no paths[] — use exitPairs + blankPaths ──
-    const exits  = hex.exits || [];
-    const ep     = hex.exitPairs || [];
-    const byp    = hex.blankPaths || [];
-    const termSuffix = hex.feature === 'offboard'
-      ? `,terminal:${hex.taperStyle||1}`
-      : (hex.terminal ? ',terminal:1' : '');
-    const emitBypass = () => byp.forEach(([a,b]) => parts.push(`path=a:${(a+rot)%6},b:${(b+rot)%6}`));
-    function nodeExits(i, total) {
-      if (ep.length > i) return ep[i] || [];
-      const chunk = Math.ceil(exits.length / total);
-      return exits.slice(i * chunk, (i + 1) * chunk);
-    }
-
-    if (!hex.feature || hex.feature === 'none') {
-      emitBypass();
-    } else if (hex.feature === 'oo' || hex.feature === 'c') {
-      nodeExits(0,2).forEach(e => parts.push(`path=a:${(e+rot)%6},b:_0${termSuffix}`));
-      nodeExits(1,2).forEach(e => parts.push(`path=a:${(e+rot)%6},b:_1${termSuffix}`));
-      emitBypass();
-    } else if (hex.feature === 'm') {
-      [0,1,2].forEach(i => nodeExits(i,3).forEach(e => parts.push(`path=a:${(e+rot)%6},b:_${i}${termSuffix}`)));
-      emitBypass();
-    } else if (hex.feature === 'dualTown') {
-      nodeExits(0,2).forEach(e => parts.push(`path=a:${(e+rot)%6},b:_0${termSuffix}`));
-      nodeExits(1,2).forEach(e => parts.push(`path=a:${(e+rot)%6},b:_1${termSuffix}`));
-      emitBypass();
     } else {
-      nodeExits(0,1).forEach(e => parts.push(`path=a:${(e+rot)%6},b:_0${termSuffix}`));
-      emitBypass();
+      nonEe.push(p);
     }
+  });
+
+  for (const { ea, eb, lanes } of eeGroups.values()) {
+    const lanesAttr = lanes > 1 ? `,lanes:${lanes}` : '';
+    parts.push(`path=a:${(ea + rot) % 6},b:${(eb + rot) % 6}${lanesAttr}`);
   }
+
+  // Non-edge-to-edge: collapse multi-lane aLane:[N,i] expansions back to lanes:N.
+  nonEe.forEach(p => {
+    const termAttr = p.terminal ? `,terminal:${p.terminal}` : '';
+    const aE = p.a?.type === 'edge', bE = p.b?.type === 'edge';
+    const aN = p.a?.type === 'node', bN = p.b?.type === 'node';
+    if (aE && bN) {
+      if (Array.isArray(p.aLane) && p.aLane[1] > 0) return;
+      const lanesAttr = Array.isArray(p.aLane) && p.aLane[0] > 1 ? `,lanes:${p.aLane[0]}` :
+                        (p.lanes || 1) > 1 ? `,lanes:${p.lanes}` : '';
+      parts.push(`path=a:${(p.a.n+rot)%6},b:_${p.b.n}${termAttr}${lanesAttr}`);
+    } else if (aN && bE) {
+      if (Array.isArray(p.bLane) && p.bLane[1] > 0) return;
+      const lanesAttr = Array.isArray(p.bLane) && p.bLane[0] > 1 ? `,lanes:${p.bLane[0]}` :
+                        (p.lanes || 1) > 1 ? `,lanes:${p.lanes}` : '';
+      parts.push(`path=a:_${p.a.n},b:${(p.b.n+rot)%6}${termAttr}${lanesAttr}`);
+    } else if (aN && bN) {
+      parts.push(`path=a:_${p.a.n},b:_${p.b.n}`);
+    }
+  });
 
   // ── Upgrade / terrain ─────────────────────────────────────────────────────
   if (hex.terrain || hex.terrainCost) {

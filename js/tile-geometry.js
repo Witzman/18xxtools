@@ -730,7 +730,9 @@ function parseDSL(dslString, color) {
 
   const nodes = [];
   const paths = [];
-  let labelStr = null;
+  let labelStr      = null;
+  let upgradeCost    = null;
+  let upgradeTerrain = null;
 
   // Split into component strings. tile.rb format uses literal ';' between
   // key:value pairs within a component, and components are separated by
@@ -827,14 +829,18 @@ function parseDSL(dslString, color) {
       if (!labelStr) labelStr = kvStr.split(';')[0].split(',')[0].trim() || null;
 
     } else if (type === 'upgrade') {
-      // upgrade component tells us tile color transitions — we don't need it
-      // for rendering. Skip silently.
+      // upgrade=cost:80,terrain:water  — preserve cost and terrain for rendering.
+      // tobymao renders the cost as a number in the upper-right of the tile.
+      if (kv['cost'])    upgradeCost    = parseInt(kv['cost'], 10);
+      if (kv['terrain']) upgradeTerrain = kv['terrain'];
     }
     // border, icon, frame, junction, halt: silently ignored
   }
 
   const result = { color: color || 'yellow', nodes, paths };
-  if (labelStr) result.label = labelStr;
+  if (labelStr)       result.label         = labelStr;
+  if (upgradeCost)    result.upgradeCost   = upgradeCost;
+  if (upgradeTerrain) result.upgradeTerrain = upgradeTerrain;
   return result;
 }
 

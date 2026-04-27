@@ -8,7 +8,7 @@
 // buildHexSvg(r,c,hex) — returns SVG string for one hex group
 // hexToSvgInner(hex,tileDef) — inner track/city/town geometry (shared with swatches)
 
-const RENDERER_VERSION = '2026-04-22-overlay-pass';
+const RENDERER_VERSION = '2026-04-26-center-loc-fix';
 console.log(`[renderer] loaded version=${RENDERER_VERSION}`);
 
 // ── Debug: inspect a hex by grid key; supports before/after comparison ────────
@@ -50,8 +50,8 @@ window.debugHex = function(key, label) {
 
     // Render SVG for any DSL hex (including pure-track, feature='none')
     if (!hex.tile) {
-      const hasContent = (hex.paths?.length > 0) || (hex.exits?.length > 0) ||
-                         (hex.feature && hex.feature !== 'none' && hex.feature !== 'blank');
+      const hasContent = (hex.nodes?.length > 0) || (hex.paths?.length > 0) || (hex.exits?.length > 0) ||
+                         (hex.feature === 'offboard');
       if (hasContent) {
         try {
           const svg  = hexToSvgInner(hex, null);
@@ -686,9 +686,11 @@ function buildIconsSvg(hex) {
 // (SVG y-axis points down, so edge 0 = directly below center.)
 const DSL_SLOT_R  = 12.5;  // city/token circle radius
 const DSL_CITY_D  = 25;    // city center distance from hex center (at an edge)
-const DSL_TRACK_W = 5;     // track stroke-width
-const DSL_BAR_RW  = 16;    // town bar half-width
-const DSL_BAR_RH  = 4;     // town bar half-height
+const DSL_TRACK_W = 5;     // track width (used for lane geometry calculations)
+const DSL_TRACK_W_WHITE = 6;   // track white halo stroke-width  (tobymao 12 × 0.5)
+const DSL_TRACK_W_BLACK = 4.5; // track black center stroke-width (tobymao  9 × 0.5)
+const DSL_BAR_RW  = 17;    // town bar half-width  (tobymao 34 × 0.5)
+const DSL_BAR_RH  = 4.25;  // town bar half-height (tobymao 8.5 × 0.5)
 
 function ep(edge) {
   const a = edge * Math.PI / 3;
@@ -730,10 +732,9 @@ function cityEdgePos(edge) {
 // Only city and town nodes receive meaningful values; all other types stay null.
 //
 // This result drives three things:
-//   1. City symbol placement in hexToSvgInner (fix: uses first connEdge today)
-//   2. Revenue bubble positioning in _buildDslRevenueSvg (fix: both cities
-//      land on the same edge today because _nodeEdge returns null for both)
-//   3. Location-name position in buildHexSvg (fix: always l_center today)
+//   1. City symbol placement in hexToSvgInner
+//   2. Revenue bubble positioning in _buildDslRevenueSvg
+//   3. Location-name position in buildHexSvg
 function computePreferredEdges(hex) {
   const nodes     = hex.nodes || [];
   const paths     = hex.paths || [];
@@ -846,26 +847,36 @@ function computePreferredEdges(hex) {
 
   // Assign preferred edge to each node, updating edge_count after each
   // assignment so later nodes avoid already-used edges.
+  //
+  // tobymao: edge = ct.loc ? compute_loc(ct.loc) : edges_.min_by { |e| edge_count[e] }
+  //   compute_loc returns nil for nil OR 'center', but ct.loc is still truthy for 'center'.
+  //   So 'center' nodes get edge=nil (center) without touching edge_count.
+  //   In JS we must distinguish 'center' (explicit, stays null) from no-locStr (compute).
   for (const { ni, edges } of ctList) {
     const loc = _nodeEdge(nodes[ni]);
     if (loc !== null) {
+      // Numeric loc: assign directly, no edge_count update.
       result[ni] = loc;
-      // No edge_count update for explicit locs (tobymao: `unless ct.loc`).
+    } else if (nodes[ni].locStr === 'center') {
+      // Explicit loc:center → stays null (center) even when paths exist.
+      // tobymao: compute_loc('center') returns nil → edge stays nil.
     } else if (edges.length > 0) {
+      // No explicit loc: pick least-used connected edge.
       const best = edges.reduce((b, e) => edgeCount[e] < edgeCount[b] ? e : b);
       result[ni] = best;
       edgeCount[best] += 1;
       edgeCount[(best + 1) % 6] += 0.1;
       edgeCount[(best - 1 + 6) % 6] += 0.1;
     }
-    // edges.length === 0 → pathless; handled by the pass below.
+    // edges.length === 0 && no locStr → pathless; handled by the pass below.
   }
 
   // ── Pathless city/town with one sibling: place opposite (+3) ────────────
   // tobymao: "take care of city/towns with no paths when there is one other ct"
+  // Exclude explicit loc:center nodes — they stay at center regardless.
   const pathlessCTs = cityTowns.filter(n => {
     const ni = nodes.indexOf(n);
-    return (ctEdgesMap[ni] || []).length === 0 && _nodeEdge(n) === null;
+    return (ctEdgesMap[ni] || []).length === 0 && _nodeEdge(n) === null && n.locStr !== 'center';
   });
   if (pathlessCTs.length === 1 && cityTowns.length === 2) {
     const ni      = nodes.indexOf(pathlessCTs[0]);
@@ -952,9 +963,11 @@ function hexToSvgInner(hex, tileDef) {
   // the renderer computes all positions the same way it does for map hexes.
   if (tileDef) {
     hex = {
-      nodes: tileDef.nodes || [],
-      paths: tileDef.paths || [],
-      exits: _exitsFromPaths(tileDef.paths || []),
+      nodes:          tileDef.nodes || [],
+      paths:          tileDef.paths || [],
+      exits:          _exitsFromPaths(tileDef.paths || []),
+      upgradeCost:    tileDef.upgradeCost    || null,
+      upgradeTerrain: tileDef.upgradeTerrain || null,
     };
     tileDef = null; // fall through to DSL branch below
   }
@@ -1032,8 +1045,6 @@ function hexToSvgInner(hex, tileDef) {
     // increment_cost: add weight to each region after placement
     const _otInc  = loc => { for (const r of loc.r) _ru[r] += loc.w; };
 
-    const cityNodeCount = hex.nodes.filter(n => n.type === 'city').length;
-
     // Pre-compute preferred edges for all city/town nodes using tobymao's
     // compute_city_town_edges algorithm.  These drive city symbol placement
     // (below), revenue bubble positions, and location-name placement.
@@ -1079,7 +1090,10 @@ function hexToSvgInner(hex, tileDef) {
 
       } else if (node.type === 'city') {
         let pos;
-        if (node.locStr && node.locStr !== 'center') {
+        if (node.locStr === 'center') {
+          // Explicit loc:center → always (0,0). Must not fall through to computePreferredEdges.
+          pos = { x: 0, y: 0, angle: 0 };
+        } else if (node.locStr) {
           const f = parseFloat(node.locStr);
           if (!isNaN(f)) {
             const a = f * Math.PI / 3;
@@ -1088,17 +1102,15 @@ function hexToSvgInner(hex, tileDef) {
           }
         }
         if (!pos) {
-          if (cityNodeCount >= 2) {
-            // Use tobymao compute_city_town_edges result (preferred edge) for this city.
-            // Falls back to center only when the algorithm returns null (extremely rare
-            // in valid hex DSL, but safe default).
-            const prefEdge = prefEdges[ni];
-            pos = (prefEdge !== null && prefEdge !== undefined)
-              ? { ...cityEdgePos(prefEdge), angle: prefEdge * 60 }
-              : { x: 0, y: 0, angle: 0 };
-          } else {
-            pos = { x: 0, y: 0, angle: 0 };
-          }
+          // Always use computePreferredEdges result when non-null.
+          // • Single city alone → computePreferredEdges returns null → center (0,0). ✓
+          // • Single city + companion town (e.g. tile #603 Wien) → general-case assigns
+          //   an offset edge → city placed there, not forced to center. ✓
+          // • OO / multi-city → each city gets its own preferred edge. ✓
+          const prefEdge = prefEdges[ni];
+          pos = (prefEdge !== null && prefEdge !== undefined)
+            ? { ...cityEdgePos(prefEdge), angle: prefEdge * 60 }
+            : { x: 0, y: 0, angle: 0 };
         }
         nodePos.push(pos);
         // Cities were pre-incremented above; no additional _ru update here.
@@ -1107,7 +1119,9 @@ function hexToSvgInner(hex, tileDef) {
         // Town
         // source: tobymao town.rb, town_rect.rb, town_dot.rb
         let pos;
-        if (node.locStr && node.locStr !== 'center') {
+        if (node.locStr === 'center') {
+          pos = { x: 0, y: 0, angle: 0 };
+        } else if (node.locStr) {
           const f = parseFloat(node.locStr);
           if (!isNaN(f)) {
             const a = f * Math.PI / 3;
@@ -1237,7 +1251,8 @@ function hexToSvgInner(hex, tileDef) {
       if (path.a.type === 'node' && path.b.type === 'node') {
         // Internal path (node→node, e.g. city→town in 1822 D35): straight line.
         // No arc needed — both endpoints are interior points, not edge midpoints.
-        svg += `<line x1="${posA.x.toFixed(1)}" y1="${posA.y.toFixed(1)}" x2="${posB.x.toFixed(1)}" y2="${posB.y.toFixed(1)}" stroke="#000" stroke-width="${DSL_TRACK_W}" stroke-linecap="round"/>`;
+        svg += `<line x1="${posA.x.toFixed(1)}" y1="${posA.y.toFixed(1)}" x2="${posB.x.toFixed(1)}" y2="${posB.y.toFixed(1)}" stroke="#fff" stroke-width="${DSL_TRACK_W_WHITE}"/>`;
+        svg += `<line x1="${posA.x.toFixed(1)}" y1="${posA.y.toFixed(1)}" x2="${posB.x.toFixed(1)}" y2="${posB.y.toFixed(1)}" stroke="#000" stroke-width="${DSL_TRACK_W_BLACK}"/>`;
       } else {
         // Edge→node or edge→edge path
         const ePt = path.a.type === 'edge' ? posA : posB;
@@ -1262,9 +1277,11 @@ function hexToSvgInner(hex, tileDef) {
           const isCenter = (Math.abs(nPt.x) < 0.5 && Math.abs(nPt.y) < 0.5);
           if (!isCenter && !checkColinear(ePt.x, ePt.y, nPt.x, nPt.y)) {
             const arc = calcArc(ePt.x, ePt.y, nPt.x, nPt.y);
-            svg += `<path d="M ${ePt.x.toFixed(1)} ${ePt.y.toFixed(1)} A ${arc.radius.toFixed(2)} ${arc.radius.toFixed(2)} 0 0 ${arc.sweep} ${nPt.x.toFixed(1)} ${nPt.y.toFixed(1)}" stroke="#000" stroke-width="${DSL_TRACK_W}" stroke-linecap="round" fill="none"/>`;
+            svg += `<path d="M ${ePt.x.toFixed(1)} ${ePt.y.toFixed(1)} A ${arc.radius.toFixed(2)} ${arc.radius.toFixed(2)} 0 0 ${arc.sweep} ${nPt.x.toFixed(1)} ${nPt.y.toFixed(1)}" stroke="#fff" stroke-width="${DSL_TRACK_W_WHITE}" fill="none"/>`;
+            svg += `<path d="M ${ePt.x.toFixed(1)} ${ePt.y.toFixed(1)} A ${arc.radius.toFixed(2)} ${arc.radius.toFixed(2)} 0 0 ${arc.sweep} ${nPt.x.toFixed(1)} ${nPt.y.toFixed(1)}" stroke="#000" stroke-width="${DSL_TRACK_W_BLACK}" fill="none"/>`;
           } else {
-            svg += `<line x1="${ePt.x.toFixed(1)}" y1="${ePt.y.toFixed(1)}" x2="${nPt.x.toFixed(1)}" y2="${nPt.y.toFixed(1)}" stroke="#000" stroke-width="${DSL_TRACK_W}" stroke-linecap="round"/>`;
+            svg += `<line x1="${ePt.x.toFixed(1)}" y1="${ePt.y.toFixed(1)}" x2="${nPt.x.toFixed(1)}" y2="${nPt.y.toFixed(1)}" stroke="#fff" stroke-width="${DSL_TRACK_W_WHITE}"/>`;
+            svg += `<line x1="${ePt.x.toFixed(1)}" y1="${ePt.y.toFixed(1)}" x2="${nPt.x.toFixed(1)}" y2="${nPt.y.toFixed(1)}" stroke="#000" stroke-width="${DSL_TRACK_W_BLACK}"/>`;
           }
         }
       }
@@ -1341,11 +1358,11 @@ function hexToSvgInner(hex, tileDef) {
             svg += `<circle cx="${pos.x.toFixed(1)}" cy="${pos.y.toFixed(1)}" r="${r}" fill="white" stroke="none"/>`;
           }
           for (const off of offsets) {
-            svg += `<circle cx="${(pos.x + off.x).toFixed(1)}" cy="${(pos.y + off.y).toFixed(1)}" r="${DSL_SLOT_R}" fill="white" stroke="#000" stroke-width="2"/>`;
+            svg += `<circle cx="${(pos.x + off.x).toFixed(1)}" cy="${(pos.y + off.y).toFixed(1)}" r="${DSL_SLOT_R}" fill="white" stroke="#000" stroke-width="1.5"/>`;
           }
         } else {
           // Single-slot city circle
-          svg += `<circle cx="${pos.x.toFixed(1)}" cy="${pos.y.toFixed(1)}" r="${DSL_SLOT_R}" fill="white" stroke="#000" stroke-width="2"/>`;
+          svg += `<circle cx="${pos.x.toFixed(1)}" cy="${pos.y.toFixed(1)}" r="${DSL_SLOT_R}" fill="white" stroke="#000" stroke-width="1.5"/>`;
         }
 
       } else if (node.type === 'town') {
@@ -1427,9 +1444,11 @@ function hexToSvgInner(hex, tileDef) {
       if (path.a.type === 'node' && aL && aL[0] > 1 && _eN2 !== null) posA = _shiftPt(posA, _eN2, _laneShift(aL[0], aL[1]));
       if (!checkColinear(posA.x, posA.y, posB.x, posB.y)) {
         const arc = calcArc(posA.x, posA.y, posB.x, posB.y);
-        svg += `<path d="M ${posA.x.toFixed(1)} ${posA.y.toFixed(1)} A ${arc.radius.toFixed(2)} ${arc.radius.toFixed(2)} 0 0 ${arc.sweep} ${posB.x.toFixed(1)} ${posB.y.toFixed(1)}" stroke="#000" stroke-width="${DSL_TRACK_W}" stroke-linecap="round" fill="none"/>`;
+        svg += `<path d="M ${posA.x.toFixed(1)} ${posA.y.toFixed(1)} A ${arc.radius.toFixed(2)} ${arc.radius.toFixed(2)} 0 0 ${arc.sweep} ${posB.x.toFixed(1)} ${posB.y.toFixed(1)}" stroke="#fff" stroke-width="${DSL_TRACK_W_WHITE}" fill="none"/>`;
+        svg += `<path d="M ${posA.x.toFixed(1)} ${posA.y.toFixed(1)} A ${arc.radius.toFixed(2)} ${arc.radius.toFixed(2)} 0 0 ${arc.sweep} ${posB.x.toFixed(1)} ${posB.y.toFixed(1)}" stroke="#000" stroke-width="${DSL_TRACK_W_BLACK}" fill="none"/>`;
       } else {
-        svg += `<line x1="${posA.x.toFixed(1)}" y1="${posA.y.toFixed(1)}" x2="${posB.x.toFixed(1)}" y2="${posB.y.toFixed(1)}" stroke="#000" stroke-width="${DSL_TRACK_W}" stroke-linecap="round"/>`;
+        svg += `<line x1="${posA.x.toFixed(1)}" y1="${posA.y.toFixed(1)}" x2="${posB.x.toFixed(1)}" y2="${posB.y.toFixed(1)}" stroke="#fff" stroke-width="${DSL_TRACK_W_WHITE}"/>`;
+        svg += `<line x1="${posA.x.toFixed(1)}" y1="${posA.y.toFixed(1)}" x2="${posB.x.toFixed(1)}" y2="${posB.y.toFixed(1)}" stroke="#000" stroke-width="${DSL_TRACK_W_BLACK}"/>`;
       }
     }
   }
@@ -1438,7 +1457,15 @@ function hexToSvgInner(hex, tileDef) {
   // source: tobymao track_stub.rb build_props — M 0 87 L 0 65 (100-unit) → M 0 43.5 L 0 32.5 (×0.5)
   // stroke-linecap:'butt' per source (not round).
   for (const stub of (hex.stubs || [])) {
-    svg += `<path d="M 0 43.5 L 0 32.5" transform="rotate(${stub.edge * 60})" stroke="#000" stroke-width="${DSL_TRACK_W}" stroke-linecap="butt" fill="none"/>`;
+    svg += `<path d="M 0 43.5 L 0 32.5" transform="rotate(${stub.edge * 60})" stroke="#fff" stroke-width="${DSL_TRACK_W_WHITE}" stroke-linecap="butt" fill="none"/>`;
+    svg += `<path d="M 0 43.5 L 0 32.5" transform="rotate(${stub.edge * 60})" stroke="#000" stroke-width="${DSL_TRACK_W_BLACK}" stroke-linecap="butt" fill="none"/>`;
+  }
+
+  // ── Upgrade cost — tobymao upgrade.rb renders cost as a number at (30,-60) ──
+  // 100-unit → 50-unit: (15, -30).  No terrain icon in the tile SVG itself;
+  // tobymao just shows the number (e.g. tile 438: "80" at translate(30,-60)).
+  if (hex.upgradeCost) {
+    svg += `<text x="15" y="-30" font-family="Lato,Arial,sans-serif" font-size="10" font-weight="bold" fill="#000" text-anchor="middle" dominant-baseline="middle">${hex.upgradeCost}</text>`;
   }
 
   return svg;
@@ -1961,9 +1988,9 @@ function _buildDslRevenueSvg(hex, totalDeg, sc) {
 
   // Render one revenue bubble centred at world (w.x, w.y).
   function bubble(w, rev) {
-    const r = 7.5;
-    return `<circle cx="${w.x.toFixed(1)}" cy="${w.y.toFixed(1)}" r="${r}" fill="white" stroke="#777" stroke-width="1"/>` +
-           `<text x="${w.x.toFixed(1)}" y="${w.y.toFixed(1)}" font-family="Lato,Arial,sans-serif" font-size="8" font-weight="bold" fill="#000" text-anchor="middle" dominant-baseline="middle">${rev}</text>`;
+    const r = 9.5 * sc;
+    return `<circle cx="${w.x.toFixed(1)}" cy="${w.y.toFixed(1)}" r="${r.toFixed(1)}" fill="white" stroke="#777" stroke-width="${(sc).toFixed(2)}"/>` +
+           `<text x="${w.x.toFixed(1)}" y="${w.y.toFixed(1)}" font-family="Lato,Arial,sans-serif" font-size="${(10 * sc).toFixed(1)}" font-weight="bold" fill="#000" text-anchor="middle" dominant-baseline="middle">${rev}</text>`;
   }
 
   // Render phase-revenue colored blocks centred at world coords (w.x, w.y).
@@ -1976,7 +2003,7 @@ function _buildDslRevenueSvg(hex, totalDeg, sc) {
     if (!parts.length) return '';
     const allSame = parts.every(p => p.value === parts[0].value);
     if (allSame) return bubble(w, parts[0].value);
-    const bw = 13 * scl, bh = 9 * scl, gapW = scl;
+    const bw = 16 * scl, bh = 11 * scl, gapW = scl;
     const tw = parts.length * bw + (parts.length - 1) * gapW;
     let bx = w.x - tw / 2;
     const byp = w.y - bh / 2;
@@ -1984,7 +2011,7 @@ function _buildDslRevenueSvg(hex, totalDeg, sc) {
     for (const { color, value } of parts) {
       const fc = TILE_HEX_COLORS[color] || '#ccc';
       s += `<rect x="${bx.toFixed(1)}" y="${byp.toFixed(1)}" width="${bw.toFixed(1)}" height="${bh.toFixed(1)}" fill="${fc}" stroke="rgba(0,0,0,0.35)" stroke-width="0.5"/>`;
-      s += `<text x="${(bx + bw / 2).toFixed(1)}" y="${w.y.toFixed(1)}" font-family="Lato,Arial,sans-serif" font-size="6" font-weight="bold" fill="#111" text-anchor="middle" dominant-baseline="middle">${value}</text>`;
+      s += `<text x="${(bx + bw / 2).toFixed(1)}" y="${w.y.toFixed(1)}" font-family="Lato,Arial,sans-serif" font-size="${(8 * scl).toFixed(1)}" font-weight="bold" fill="#111" text-anchor="middle" dominant-baseline="middle">${value}</text>`;
       bx += bw + gapW;
     }
     return s;
@@ -2281,13 +2308,28 @@ function _buildDslRevenueSvg(hex, totalDeg, sc) {
 // Region constants from base.rb:
 //   TRACK_TO_EDGE_0=[15,21]  TRACK_TO_EDGE_3=[2,8]
 //   TOP_ROW=[0,1,2,3,4]      BOTTOM_ROW=[19,20,21,22,23]
+// l_top and l_bottom have separate rwIn (cost calc) and rwOut (region_use update)
+// per tobymao location_name.rb (region_weights_in / region_weights_out).
 const _LOC_NAME_FLAT = [
-  { rw: [[[9,14],1],[[7,8,15,16],0.7]],                ny:  0    }, // l_center
-  { rw: [[[0,2,4,6,8,10],0.7],[[1,3,7,9],0.2]],        ny: -0.40 }, // l_up40
-  { rw: [[[13,15,17,19,21,23],0.7],[[14,16,20,22],0.2]],ny:  0.40 }, // l_down40
-  { rw: [[[15,21],1],[[19,20,21,22,23],1.5]],           ny:  0.56 }, // l_bottom (rwIn)
-  { rw: [[[2,8],1],[[0,1,2,3,4],2]],                    ny: -0.61 }, // l_top    (rwIn)
+  { rw:   [[[9,14],1],[[7,8,15,16],0.7]],                   ny:  0    }, // l_center
+  { rw:   [[[0,2,4,6,8,10],0.7],[[1,3,7,9],0.2]],           ny: -0.40 }, // l_up40
+  { rw:   [[[13,15,17,19,21,23],0.7],[[14,16,20,22],0.2]],  ny:  0.40 }, // l_down40
+  { rwIn: [[[15,21],1],[[19,20,21,22,23],1.5]],
+    rwOut:[[[19,20,21,22,23],1]],                            ny:  0.56 }, // l_bottom
+  { rwIn: [[[2,8],1],[[0,1,2,3,4],2]],
+    rwOut:[[[0,1,2,3,4],1]],                                 ny: -0.61 }, // l_top
 ];
+
+// _ECR: tobymao city.rb EDGE_CITY_REGIONS — exact per-edge region lists.
+// Edge-placed cities (locStr or path-connected) occupy these 24-region positions.
+const _ECR = {
+  0:   [15,20,21,22], 0.5: [13,14,15,19,20,21],
+  1:   [12,13,14,19], 1.5: [5,6,7,12,13,14],
+  2:   [0,5,6,7],     2.5: [0,1,2,6,7,8],
+  3:   [1,2,3,8],     3.5: [2,3,4,8,9,10],
+  4:   [4,9,10,11],   4.5: [9,10,11,16,17,18],
+  5:   [16,17,18,23], 5.5: [15,16,17,21,22,23],
+};
 
 // _locNameCost: weighted sum of region_use over [[regions,weight],...] pairs.
 // Direct port of tobymao base.rb Base#combined_cost.
@@ -2303,50 +2345,114 @@ function _locNameCost(ru, rw) {
 // Ensures every label goes through the same single implementation.
 //
 // Parameters:
-//   label  — string (Y, M, T, OO, etc.)
-//   nodes  — node array with .type ('city'|'town') and .slots
-//             — either tileDef.nodes or hex.nodes
-//   paths  — path array with .a/.b = {type:'edge'|'node', n:int}
-//             — either tileDef.paths or hex.paths
-//   sz     — coordinate scale:
-//             HEX_SIZE → world coordinates (placed tiles on map)
-//             50       → tile coordinates   (palette swatches)
+//   label    — string (Y, M, T, OO, etc.)
+//   nodes    — node array with .type ('city'|'town') and .slots
+//               — either tileDef.nodes or hex.nodes
+//   paths    — path array with .a/.b = {type:'edge'|'node', n:int}
+//               — either tileDef.paths or hex.paths
+//   sz       — coordinate scale:
+//               HEX_SIZE → world coordinates (placed tiles on map)
+//               50       → tile coordinates   (palette swatches)
+//   totalDeg — rotation (degrees) already applied to the tile's inner SVG.
+//              The label position is computed in tile-local (pre-rotation) space;
+//              we rotate it by totalDeg so the label anchor follows the tile content.
+//              Text stays horizontal.
+//   cityName — optional city/location name string (e.g. 'Wien').
+//              When provided for a multi-city tile, we simulate the Part::LocationName
+//              placement (using _LOC_NAME_FLAT) and apply its region_weights_out to
+//              region_use before picking the label position — exactly matching tobymao's
+//              render order: cities → location_name → label.
 //
 // Returns SVG <text> string in (sz/100)-scaled space, or '' for empty label.
 // Font: tobymao tile__text (14px × scale(1.5) = 21px effective at 100-unit).
 // Style: fill:black, no bold, no stroke (exact tobymao tile__text CSS).
-// totalDeg: rotation (degrees) already applied to the tile's inner SVG.
-// The label position is computed in tile-local (pre-rotation) space; we rotate
-// it by totalDeg so the label anchor follows the tile content.  Text stays horizontal.
-function _buildLabelSvg(label, nodes, paths, sz, totalDeg = 0) {
+function _buildLabelSvg(label, nodes, paths, sz, totalDeg = 0, cityName = '') {
   if (!label || label === '') return '';
 
   const _cities    = nodes.filter(n => n.type === 'city');
   const _cityTowns = nodes.filter(n => n.type === 'city' || n.type === 'town');
 
-  // region_use — port of tobymao base.rb TRACK_TO_EDGE_N + CENTER
+  // ── region_use ──────────────────────────────────────────────────────────────
+  // Port of tobymao base.rb / city.rb region_use accumulation.
+  // Tracks: TRACK_TO_EDGE_N per connected edge.
+  // Cities: EDGE_CITY_REGIONS[edge] when edge-placed; CENTER when center-placed.
+  // (tobymao city.rb uses EDGE_CITY_REGIONS, NOT the simpler TRACK_TO_EDGE_N.)
   const _TTE = [[15,21],[13,14],[6,7],[2,8],[9,10],[16,17]]; // TRACK_TO_EDGE_N
   const _CTR = [7,8,9,14,15,16];                             // CENTER
   const _ru  = new Array(24).fill(0);
+
+  // Tracks contribute to region_use via TRACK_TO_EDGE_N
   for (const p of (paths || [])) {
     if (p.a?.type === 'edge') { const rr = _TTE[p.a.n]; if (rr) for (const r of rr) _ru[r] += 1; }
     if (p.b?.type === 'edge') { const rr = _TTE[p.b.n]; if (rr) for (const r of rr) _ru[r] += 1; }
   }
-  for (const n of nodes) { if (n.type === 'city') for (const r of _CTR) _ru[r] += 1; }
 
-  // Candidate positions — tobymao label.rb preferred_render_locations, flat layout.
+  // Build nodeIndex → connected edge list from paths (for edge-placed cities with no locStr)
+  const _nodeEdgeMap = {};
+  for (const p of (paths || [])) {
+    if (p.a?.type === 'edge' && p.b?.type === 'node') {
+      if (!_nodeEdgeMap[p.b.n]) _nodeEdgeMap[p.b.n] = [];
+      _nodeEdgeMap[p.b.n].push(p.a.n);
+    }
+    if (p.b?.type === 'edge' && p.a?.type === 'node') {
+      if (!_nodeEdgeMap[p.a.n]) _nodeEdgeMap[p.a.n] = [];
+      _nodeEdgeMap[p.a.n].push(p.b.n);
+    }
+  }
+
+  // Cities contribute via EDGE_CITY_REGIONS (or CENTER for center-placed cities)
+  for (let ni = 0; ni < nodes.length; ni++) {
+    const n = nodes[ni];
+    if (n.type !== 'city') continue;
+    let edge = null;
+    // Explicit locStr integer → that edge
+    if (n.locStr && n.locStr !== 'center' && !isNaN(parseFloat(n.locStr))) {
+      edge = parseFloat(n.locStr);
+    } else if ((_nodeEdgeMap[ni] || []).length > 0) {
+      // Path-connected → first connected edge
+      edge = _nodeEdgeMap[ni][0];
+    }
+    // Round to nearest 0.5 step so half-edge keys (0.5, 1.5…) resolve correctly
+    const _ecrKey = edge !== null ? Math.round(edge * 2) / 2 : null;
+    const ecr = _ecrKey !== null ? _ECR[_ecrKey] : null;
+    if (ecr) { for (const r of ecr) _ru[r] += 1; }
+    else      { for (const r of _CTR) _ru[r] += 1; } // center-placed city
+  }
+
+  // ── Simulate Part::LocationName placement ────────────────────────────────────
+  // tobymao render order: Track → Cities → LocationName → Label.
+  // When a city name is present on a multi-city tile, the LocationName part runs
+  // before Label and updates region_use with its region_weights_out.  Without this
+  // the label ignores the space occupied by the city name text and collides with it.
+  if (cityName && _cityTowns.length > 1) {
+    let _lnBestCand = null, _lnBestCost = Infinity;
+    for (let i = 0; i < _LOC_NAME_FLAT.length; i++) {
+      const cand = _LOC_NAME_FLAT[i];
+      const cost = _locNameCost(_ru, cand.rwIn || cand.rw);
+      if (cost < _lnBestCost) { _lnBestCost = cost; _lnBestCand = cand; }
+    }
+    if (_lnBestCand) {
+      // Apply region_weights_out (or rw) to region_use before label placement
+      const rwOut = _lnBestCand.rwOut || _lnBestCand.rw;
+      for (const [regions, weight] of rwOut) {
+        for (const r of regions) _ru[r] += weight;
+      }
+    }
+  }
+
+  // ── Candidate positions ──────────────────────────────────────────────────────
+  // tobymao label.rb preferred_render_locations, flat layout.
   // Coordinates in tobymao 100-unit space; scaled to output space by × sz/100 below.
-  //   LEFT_MID=[6,13] LEFT_CORNER=[5,12] LEFT_CENTER=[7,14]
-  //   RIGHT_MID=[10,17] RIGHT_CORNER=[11,18] RIGHT_CENTER=[9,16]
+  //   LEFT_CORNER=[5,12]  RIGHT_CORNER=[11,18]
   //   UPPER_LEFT_CORNER=[0,1]  UPPER_RIGHT_CORNER=[3,4]
-  //   BOTTOM_LEFT_CORNER=[19,20] BOTTOM_RIGHT_CORNER=[22,23]
+  //   BOTTOM_LEFT_CORNER=[19,20]  BOTTOM_RIGHT_CORNER=[22,23]
   let _cands;
   if (_cityTowns.length === 1) {
     if (_cities.length === 1 && (_cities[0].slots || 1) > 1) {
-      // single city, 2+ slots → P_LEFT_CORNER only (label.rb line 188)
-      _cands = [{ rw:[[[5,12],1.0]],                       x:-71.25, y:0 }];
+      // single city, 2+ slots → P_LEFT_CORNER only (label.rb)
+      _cands = [{ rw:[[[5,12],1.0]],                       x:-67,    y:0 }];
     } else {
-      // single city 1-slot or single town (label.rb line 190)
+      // single city 1-slot or single town
       _cands = [
         { rw:[[[5,6,12,13],1],[[7,14],0.5]],   x:-55,    y:0 }, // SINGLE_CITY_ONE_SLOT
         { rw:[[[10,11,17,18],1],[[9,16],0.5]],  x: 55,    y:0 }, // SINGLE_CITY_ONE_SLOT_RIGHT
@@ -2354,26 +2460,26 @@ function _buildLabelSvg(label, nodes, paths, sz, totalDeg = 0) {
       ];
     }
   } else if (_cityTowns.length > 1) {
-    // MULTI_CITY_LOCATIONS flat (label.rb line 193)
+    // MULTI_CITY_LOCATIONS flat — exact tobymao label.rb order and region_weights
     _cands = [
       { rw:[[[2],1.0],[[1,3],0.5]],        x:   0,    y:-60 }, // top centre
-      { rw:[[[6],1.0],[[5,7],0.5]],         x: -50,    y:-31 }, // edge 2
-      { rw:[[[17],1.0],[[16,18],0.5]],      x:  50,    y: 37 }, // edge 5
-      { rw:[[[0,1],1.0]],                   x: -40,    y:-65 }, // top-left corner
-      { rw:[[[3,4],1.0]],                   x:  40,    y:-65 }, // top-right corner
-      { rw:[[[5,12],1.0]],                  x: -71.25, y:  0 }, // P_LEFT_CORNER
+      { rw:[[[6],1.0],[[5,7],0.5]],         x: -50,    y:-31 }, // edge 2 pos
+      { rw:[[[17],1.0],[[16,18],0.5]],      x:  50,    y: 37 }, // edge 5 pos
+      { rw:[[[0,1],1.0]],                   x: -40,    y:-65 }, // upper-left corner
+      { rw:[[[3,4],1.0]],                   x:  40,    y:-65 }, // upper-right corner
+      { rw:[[[5,12],1.0]],                  x: -67,    y:  0 }, // P_LEFT_CORNER
       { rw:[[[11,18],1.0]],                 x:  71.25, y:  0 }, // P_RIGHT_CORNER
       { rw:[[[19,20],1.0]],                 x: -30,    y: 65 }, // P_BOTTOM_LEFT_CORNER
       { rw:[[[22,23],1.0]],                 x:  40,    y: 65 }, // bottom-right corner
-      { rw:[[[12,13],1.0]],                 x: -50,    y: 25 }, // edge 1
+      { rw:[[[12,13],1.0]],                 x: -50,    y: 25 }, // edge 1 pos
       { rw:[[[21],1.0],[[20,22],0.5]],      x:   0,    y: 60 }, // bottom centre
     ];
   } else {
-    // no city_towns → P_LEFT_CORNER (label.rb line 197)
-    _cands = [{ rw:[[[5,12],1.0]], x:-71.25, y:0 }];
+    // no city_towns → P_LEFT_CORNER
+    _cands = [{ rw:[[[5,12],1.0]], x:-67, y:0 }];
   }
 
-  // Pick min combined_cost; first minimum wins (tobymao min_by order preserved)
+  // Pick min combined_cost; first minimum wins (tobymao min_by.with_index)
   let _lx = _cands[0].x, _ly = _cands[0].y, _best = Infinity;
   for (const c of _cands) {
     const cost = _locNameCost(_ru, c.rw);
@@ -2382,7 +2488,6 @@ function _buildLabelSvg(label, nodes, paths, sz, totalDeg = 0) {
 
   // Rotate the tile-local (lx, ly) position by totalDeg so the label anchor
   // follows the tile content rotation.  Text glyphs stay horizontal.
-  // Clockwise SVG rotation matrix: lx' = lx·cos θ − ly·sin θ,  ly' = lx·sin θ + ly·cos θ
   const _rad = totalDeg * Math.PI / 180;
   const _rlx = _lx * Math.cos(_rad) - _ly * Math.sin(_rad);
   const _rly = _lx * Math.sin(_rad) + _ly * Math.cos(_rad);
@@ -2462,9 +2567,9 @@ function buildHexSvg(r, c, hex) {
           : '';
     if (locName) {
       // ── tobymao location_name.rb preferred_render_locations ─────────────────
-      // CRITICAL: hex.feature is a derived summary field (set to 'city' ONLY for
-      // 3+ city hexes, 'offboard' for red hexes, 'none' for everything else).
-      // It MUST NOT be used to determine label position — it cannot distinguish a
+      // CRITICAL: hex.feature is set to 'offboard' for red hexes and 'none' for
+      // everything else. It MUST NOT be used to determine label position — use
+      // hex.nodes[] instead to distinguish city/town/offboard. It cannot distinguish a
       // single-city from a town from an offboard-city hex.
       //
       // Instead we use hex.nodes[] (the actual node model populated by import-ruby.js)
@@ -2503,20 +2608,43 @@ function buildHexSvg(r, c, hex) {
           // + base.rb render_location: min_by.with_index { combined_cost, i }.
           //
           // Step 1 — region_use at label-render time.
-          // In tobymao's tile.rb rendering order, location name for multi-city tiles
-          // is rendered AFTER Part::Cities and Part::Towns have incremented region_use.
-          // We approximate: exits → TRACK_TO_EDGE_N, cities → CENTER.
+          // Port of tobymao render order: Track → Cities → LocationName.
+          // Tracks use TRACK_TO_EDGE_N; edge-placed cities use EDGE_CITY_REGIONS (_ECR);
+          // center-placed cities use CENTER.  (Prior code incorrectly used CENTER for all.)
           const _lruTTE = [[15,21],[13,14],[6,7],[2,8],[9,10],[16,17]]; // TRACK_TO_EDGE_N
           const _lruCTR = [7,8,9,14,15,16]; // CENTER
           const _lru = new Array(24).fill(0);
-          // exits — compute from paths for reliability (same as hexToSvgInner)
+          // exits — compute from paths
           for (const p of (hex.paths || [])) {
             if (p.a?.type === 'edge') { const rr = _lruTTE[p.a.n]; if (rr) for (const r of rr) _lru[r] += 1; }
             if (p.b?.type === 'edge') { const rr = _lruTTE[p.b.n]; if (rr) for (const r of rr) _lru[r] += 1; }
           }
-          // each city pre-occupies CENTER
-          for (const n of (hex.nodes || [])) {
-            if (n.type === 'city') for (const r of _lruCTR) _lru[r] += 1;
+          // Build node→edge map from paths (same logic as _buildLabelSvg)
+          const _lruNEM = {};
+          for (const p of (hex.paths || [])) {
+            if (p.a?.type === 'edge' && p.b?.type === 'node') {
+              if (!_lruNEM[p.b.n]) _lruNEM[p.b.n] = [];
+              _lruNEM[p.b.n].push(p.a.n);
+            }
+            if (p.b?.type === 'edge' && p.a?.type === 'node') {
+              if (!_lruNEM[p.a.n]) _lruNEM[p.a.n] = [];
+              _lruNEM[p.a.n].push(p.b.n);
+            }
+          }
+          // cities → EDGE_CITY_REGIONS (or CENTER for center-placed)
+          for (let _ni = 0; _ni < (hex.nodes || []).length; _ni++) {
+            const _n = hex.nodes[_ni];
+            if (_n.type !== 'city') continue;
+            let _edge = null;
+            if (_n.locStr && _n.locStr !== 'center' && !isNaN(parseFloat(_n.locStr))) {
+              _edge = parseFloat(_n.locStr);
+            } else if ((_lruNEM[_ni] || []).length > 0) {
+              _edge = _lruNEM[_ni][0];
+            }
+            const _ecrKey2 = _edge !== null ? Math.round(_edge * 2) / 2 : null;
+            const _ecr = _ecrKey2 !== null ? _ECR[_ecrKey2] : null;
+            if (_ecr) { for (const r of _ecr) _lru[r] += 1; }
+            else       { for (const r of _lruCTR) _lru[r] += 1; }
           }
 
           // Step 2 — preferred edges of all city/town nodes (for special-case check).
@@ -2535,10 +2663,11 @@ function buildHexSvg(r, c, hex) {
             ny = 0;
           } else {
             // Step 4 — general case: pick from _LOC_NAME_FLAT via min combined_cost.
+            // Use rwIn for cost calculation (tobymao region_weights_in).
             // Tiebreaks by array index (tobymao: min_by.with_index → first min wins).
             let _bestNy = 0, _bestCost = Infinity;
             for (const cand of _LOC_NAME_FLAT) {
-              const cost = _locNameCost(_lru, cand.rw);
+              const cost = _locNameCost(_lru, cand.rwIn || cand.rw);
               if (cost < _bestCost) { _bestCost = cost; _bestNy = cand.ny; }
             }
             ny = _bestNy * sz;
@@ -2581,9 +2710,10 @@ function buildHexSvg(r, c, hex) {
 
     // Tile / DSL geometry
     const hasDslContent = !hex?.tile && hex && (
-      (hex.feature && hex.feature !== 'none' && hex.feature !== 'blank') ||
-      (hex.exits  && hex.exits.length  > 0) ||
+      (hex.nodes  && hex.nodes.length  > 0) ||
       (hex.paths  && hex.paths.length  > 0) ||
+      (hex.exits  && hex.exits.length  > 0) ||
+      (hex.feature === 'offboard') ||
       (hex.label  && hex.label !== '')
     );
 
@@ -2602,8 +2732,10 @@ function buildHexSvg(r, c, hex) {
       }
 
       // DSL hex label (C, Y, OO, NY, etc.) — canonical via _buildLabelSvg
+      // Pass hex.cityName so multi-city hexes (e.g. Wien) simulate Part::LocationName
+      // placement and update region_use before picking the label position.
       if (!tileDef && hex?.label && hex.label !== '') {
-        g += _buildLabelSvg(hex.label, hex.nodes || [], hex.paths || [], sz, totalDeg);
+        g += _buildLabelSvg(hex.label, hex.nodes || [], hex.paths || [], sz, totalDeg, hex.cityName || '');
       }
 
       // DSL phase revenue — for offboards and phase-coloured city nodes (flat=null).
@@ -2635,17 +2767,17 @@ function buildHexSvg(r, c, hex) {
           let revCY = _phRevLoc.y * sz / 100;
 
           if (allSame && revVals[0] > 0) {
-            g += `<circle cx="${revCX.toFixed(1)}" cy="${revCY.toFixed(1)}" r="7.5" fill="white" stroke="#777" stroke-width="1"/>`;
-            g += `<text x="${revCX.toFixed(1)}" y="${revCY.toFixed(1)}" font-family="Lato,Arial,sans-serif" font-size="8" font-weight="bold" fill="#000" text-anchor="middle" dominant-baseline="middle">${revVals[0]}</text>`;
+            g += `<circle cx="${revCX.toFixed(1)}" cy="${revCY.toFixed(1)}" r="${(9.5*sc).toFixed(1)}" fill="white" stroke="#777" stroke-width="${sc.toFixed(2)}"/>`;
+            g += `<text x="${revCX.toFixed(1)}" y="${revCY.toFixed(1)}" font-family="Lato,Arial,sans-serif" font-size="${(10*sc).toFixed(1)}" font-weight="bold" fill="#000" text-anchor="middle" dominant-baseline="middle">${revVals[0]}</text>`;
           } else if (!allSame) {
-            const bw2 = 13*sc, bh2 = 9*sc, gapW2 = sc;
+            const bw2 = 16*sc, bh2 = 11*sc, gapW2 = sc;
             const tw2 = activeP.length * bw2 + (activeP.length - 1) * gapW2;
             let bx2 = revCX - tw2 / 2;
             const byp2 = revCY - bh2 / 2;
             for (const ph of activeP) {
               const pc2 = TILE_HEX_COLORS[ph] || '#ccc';
               g += `<rect x="${bx2.toFixed(1)}" y="${byp2.toFixed(1)}" width="${bw2.toFixed(1)}" height="${bh2.toFixed(1)}" fill="${pc2}" stroke="rgba(0,0,0,0.35)" stroke-width="0.5"/>`;
-              g += `<text x="${(bx2+bw2/2).toFixed(1)}" y="${revCY.toFixed(1)}" font-family="Lato,Arial,sans-serif" font-size="6" font-weight="bold" fill="#111" text-anchor="middle" dominant-baseline="middle">${hex.phaseRevenue[ph] || 0}</text>`;
+              g += `<text x="${(bx2+bw2/2).toFixed(1)}" y="${revCY.toFixed(1)}" font-family="Lato,Arial,sans-serif" font-size="${(8*sc).toFixed(1)}" font-weight="bold" fill="#111" text-anchor="middle" dominant-baseline="middle">${hex.phaseRevenue[ph] || 0}</text>`;
               bx2 += bw2 + gapW2;
             }
           }

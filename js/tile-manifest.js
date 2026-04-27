@@ -14,7 +14,25 @@ function _getTileDef(id) {
 }
 
 function _makeSwatchSvg(id) {
-  return makeTileSwatchSvg(id);
+  // Standard registry tile — covers built-in packs + embedded map tiles.
+  const registrySvg = makeTileSwatchSvg(id);
+  if (registrySvg) return registrySvg;
+
+  // Custom builder tile — render directly from the saved hex model.
+  const ct = state.customTiles && state.customTiles[id];
+  if (!ct || !ct.hex) return '';
+  const model = ct.hex;
+  const color = model.bg === 'gray' ? 'grey' : (model.bg || 'yellow');
+  const hexColor = TILE_HEX_COLORS[color] || '#c8a87a';
+  let inner = `<polygon points="50,0 25,43.5 -25,43.5 -50,0 -25,-43.5 25,-43.5" fill="${hexColor}" stroke="#999" stroke-width="1.5"/>`;
+  inner += hexToSvgInner(null, { nodes: model.nodes || [], paths: model.paths || [] });
+  const revHex = { nodes: model.nodes || [], paths: model.paths || [], exits: _exitsFromPaths(model.paths || []) };
+  if (revHex.nodes.length > 0) inner += _buildDslRevenueSvg(revHex, 0, 1);
+  if (model.label) inner += _buildLabelSvg(model.label, model.nodes || [], model.paths || [], 50);
+  const numBadge = `<text x="46" y="44" font-size="8" fill="rgba(255,255,255,0.4)" text-anchor="end" dominant-baseline="auto">#${id}</text>`;
+  const isPointy = state.meta && state.meta.orientation === 'pointy';
+  const hexGroup = isPointy ? `<g transform="rotate(30)">${inner}</g>` : inner;
+  return `<svg viewBox="-50 -50 100 100" width="90" height="90">${hexGroup}${numBadge}</svg>`;
 }
 
 // ── Sort ──────────────────────────────────────────────────────────────────────
@@ -22,7 +40,9 @@ function _makeSwatchSvg(id) {
 const COLOR_ORDER = { white: -1, yellow: 0, green: 1, brown: 2, grey: 3 };
 
 function tileSort(a, b) {
-  const tdA = TileRegistry.getTileDef(a), tdB = TileRegistry.getTileDef(b);
+  // Include color from custom builder tiles for correct sort-order placement.
+  const tdA = TileRegistry.getTileDef(a) || (state.customTiles?.[a]?.hex ? { color: state.customTiles[a].hex.bg } : null);
+  const tdB = TileRegistry.getTileDef(b) || (state.customTiles?.[b]?.hex ? { color: state.customTiles[b].hex.bg } : null);
   const ca = COLOR_ORDER[tdA?.color] ?? 99;
   const cb = COLOR_ORDER[tdB?.color] ?? 99;
   if (ca !== cb) return ca - cb;
@@ -41,7 +61,11 @@ function tileSort(a, b) {
 
 function sortedManifestIds() {
   return Object.keys(state.manifest)
-    .filter(id => _getTileDef(id) && (state.manifest[id] === null || state.manifest[id] > 0))
+    .filter(id => {
+      if (!(state.manifest[id] === null || state.manifest[id] > 0)) return false;
+      // Accept tiles known to TileRegistry OR tiles saved via build-a-hex.
+      return !!_getTileDef(id) || !!(state.customTiles && state.customTiles[id]);
+    })
     .sort(tileSort);
 }
 

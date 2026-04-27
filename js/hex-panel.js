@@ -73,8 +73,8 @@ function updateHexPanel(hexId) {
   const tileCitySection = document.getElementById('tileCityNameSection');
   const td = hex.tile ? TileRegistry.getTileDef(hex.tile) : null;
   const hasCityFeature =
-    (hex.static && (hex.feature === 'city' || hex.feature === 'town' || hex.feature === 'offboard')) ||
-    !!(hex.nodes && hex.nodes.some(n => n.type === 'city' || n.type === 'town'));
+    !!(hex.nodes?.some(n => n.type === 'city' || n.type === 'town')) ||
+    hex.feature === 'offboard';
   if (tileCitySection) {
     if (hasCityFeature) {
       tileCitySection.style.display = 'block';
@@ -98,7 +98,7 @@ function updateHexPanel(hexId) {
   if (phaseRevSection) {
     const showPhaseRev = hex.static === true &&
       (hex.bg === 'gray' || hex.bg === 'red') &&
-      (hex.feature === 'city' || hex.feature === 'offboard');
+      (hex.feature === 'offboard' || hex.nodes?.some(n => n.type === 'city'));
     phaseRevSection.style.display = showPhaseRev ? 'block' : 'none';
     if (showPhaseRev) {
       const pr = hex.phaseRevenue || {};

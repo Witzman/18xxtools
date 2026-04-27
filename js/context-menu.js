@@ -431,7 +431,6 @@ function showContextMenu(x, y, hexId) {
         h.tile = 0; h.rotation = 0;
         h.nodes   = [{ type: 'city', slots: 1, flat: 0 }];
         h.paths   = []; h.exits = [];
-        h.feature = 'city';
         render(); autosave();
     }},
     { label: '🔴 Single Town', onClick: () => {
@@ -440,7 +439,6 @@ function showContextMenu(x, y, hexId) {
         h.tile = 0; h.rotation = 0;
         h.nodes   = [{ type: 'town', flat: 0 }];
         h.paths   = []; h.exits = [];
-        h.feature = 'town';
         render(); autosave();
     }},
     { label: '🔴🔴 Double Town', onClick: () => {
@@ -449,7 +447,6 @@ function showContextMenu(x, y, hexId) {
         h.tile = 0; h.rotation = 0;
         h.nodes   = [{ type: 'town', flat: 0 }, { type: 'town', flat: 0 }];
         h.paths   = []; h.exits = [];
-        h.feature = 'dualTown';
         render(); autosave();
     }},
   ]);

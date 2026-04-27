@@ -228,17 +228,12 @@ function parseDslHex(code, bg, locationName) {
     static: true,
     bg,
     feature: 'none',  // set to 'offboard' only when offboard= part is parsed (not from bg alone)
-    slots: 1,
     exits: [],
     rotation: 0,
     terminal: false,
     taperStyle: 1,
     pathMode: 'star',
     pathPairs: [],
-    exitPairs: [],
-    townRevenue: 0,
-    townRevenues: [0, 0],
-    cityRevenues: [0, 0],
     phaseRevenue: { yellow: 0, green: 0, brown: 0, gray: 0 },
     activePhases: { yellow: true, green: true, brown: true, gray: true },
     cityName: locationName || '',
@@ -262,11 +257,8 @@ function parseDslHex(code, bg, locationName) {
   };
 
   const parts = code.split(';').map(s => s.trim()).filter(Boolean);
-  let cityCount = 0, townCount = 0;
   const exitSet = new Set();
-  const exitsByNode = {};   // nodeIndex → [edge, …] — used to derive exitPairs
   const pathPairList = [];  // edge-to-edge pairs (no nodes)
-  const cityRevs = [];
 
   // Parse 'N' → edge endpoint, '_N' → node endpoint
   const parseEndpt = s =>
@@ -285,37 +277,24 @@ function parseDslHex(code, bg, locationName) {
         phaseRevenue: { yellow:0, green:0, brown:0, gray:0 },
         activePhases: { yellow:true, green:true, brown:true, gray:true },
         locStr: undefined });
-      cityCount++; continue;
+      continue;
     }
     if (part === 'town' || part === 'town=') {
       hex.nodes.push({ type: 'town', flat: 0,
         phaseRevenue: { yellow:0, green:0, brown:0, gray:0 },
         activePhases: { yellow:false, green:false, brown:false, gray:false },
         locStr: undefined });
-      townCount++; continue;
+      continue;
     }
 
     if (part.startsWith('city=')) {
-      cityCount++;
       const revStr = (part.match(/revenue:([\d|_.a-z]+)/) || [])[1] || '0';
       const slots  = parseInt((part.match(/slots:(\d+)/) || [])[1] || '1');
       const { phases, active } = parsePhaseRevenue(revStr);
       const flatVal = !revStr.includes('_') ? (parseInt(revStr) || 0) : null;
       const locStr  = (part.match(/loc:([\w.]+)/) || [])[1];
-      cityRevs.push({ phases, flat: flatVal });
       const nodeActive = (Object.values(active).some(Boolean))
         ? active : { yellow:true, green:true, brown:true, gray:true };
-      if (cityCount === 1) {
-        hex.slots = slots;
-        // Do NOT overwrite hex-level phaseRevenue / activePhases when this is
-        // an offboard hex — the offboard= declaration already set those fields
-        // and its phase-variable revenue (e.g. yellow_30|green_40|brown_60|gray_80)
-        // must not be clobbered by the city's revenue:0.
-        if (hex.feature !== 'offboard') {
-          hex.phaseRevenue = phases;
-          hex.activePhases = nodeActive;
-        }
-      }
       hex.nodes.push({ type: 'city', slots, flat: flatVal,
         phaseRevenue: phases, activePhases: nodeActive, locStr });
 
@@ -328,15 +307,12 @@ function parseDslHex(code, bg, locationName) {
       hex.feature = 'offboard';
 
     } else if (part.startsWith('town=')) {
-      townCount++;
       const revStr = (part.match(/revenue:([\d|_.a-z]+)/) || [])[1] || '0';
       const locStr = (part.match(/loc:([\w.]+)/) || [])[1];
       const { phases, active } = parsePhaseRevenue(revStr);
       const rev = !revStr.includes('_') ? (parseInt(revStr) || 0) : null;
       hex.nodes.push({ type: 'town', flat: rev, phaseRevenue: phases,
         activePhases: active, locStr });
-      if (townCount === 1) { hex.townRevenue = rev ?? 0; hex.townRevenues[0] = rev ?? 0; }
-      if (townCount === 2) { hex.townRevenues[1] = rev ?? 0; }
 
     } else if (part.startsWith('path=')) {
       // Parse path=a:X,b:Y[,terminal:N][,lanes:N][,a_lane:T.I][,b_lane:T.I]
@@ -377,14 +353,8 @@ function parseDslHex(code, bg, locationName) {
           if (bothEdge) pathPairList.push([a.n, b.n]);
         }
         // Collect edge exits
-        if (a.type === 'edge') {
-          exitSet.add(a.n);
-          if (b.type === 'node') (exitsByNode[b.n] = exitsByNode[b.n] || []).push(a.n);
-        }
-        if (b.type === 'edge') {
-          exitSet.add(b.n);
-          if (a.type === 'node') (exitsByNode[a.n] = exitsByNode[a.n] || []).push(b.n);
-        }
+        if (a.type === 'edge') exitSet.add(a.n);
+        if (b.type === 'edge') exitSet.add(b.n);
       }
 
     } else if (part.startsWith('label=')) {
@@ -434,52 +404,6 @@ function parseDslHex(code, bg, locationName) {
   hex.pathPairs = pathPairList;
 
   // ── Derive hex.feature (summary only — NOT used for rendering cities/towns) ─
-  if (hex.feature !== 'offboard') {
-    if (cityCount >= 3) {
-      hex.feature = 'city';
-      hex.slots   = cityCount;
-      hex.cityRevenues = [
-        cityRevs[0]?.flat ?? (cityRevs[0]?.phases?.yellow || 0),
-        cityRevs[1]?.flat ?? (cityRevs[1]?.phases?.yellow || 0),
-      ];
-    } else if (cityCount === 2) {
-      hex.feature = 'oo';
-      hex.cityRevenues = [
-        cityRevs[0]?.flat !== null ? (cityRevs[0]?.flat || 0) : (cityRevs[0]?.phases?.yellow || 0),
-        cityRevs[1]?.flat !== null ? (cityRevs[1]?.flat || 0) : (cityRevs[1]?.phases?.yellow || 0),
-      ];
-      // exitPairs: for OO revenue bubble positioning (nodes[0] exits, nodes[1] exits)
-      const cityNIs = hex.nodes.map((n, i) => n.type === 'city' ? i : null).filter(i => i !== null);
-      if (Object.keys(exitsByNode).length >= 1) {
-        hex.exitPairs = [exitsByNode[cityNIs[0]] || [], exitsByNode[cityNIs[1]] || []];
-      } else if (exitSet.size >= 2) {
-        const exits = [...exitSet];
-        hex.exitPairs = [[exits[0]], [exits[1]]];
-      }
-    } else if (cityCount === 1) {
-      hex.feature = 'city';
-      // cityLocX/Y: backward-compat for terrain-badge collision avoidance
-      const cn = hex.nodes.find(n => n.type === 'city');
-      if (cn?.locStr && cn.locStr !== 'center') {
-        const f = parseFloat(cn.locStr);
-        if (!isNaN(f)) {
-          const angle = f * Math.PI / 3;
-          hex.cityLocX = parseFloat((-Math.sin(angle) * 25).toFixed(2));
-          hex.cityLocY = parseFloat(( Math.cos(angle) * 25).toFixed(2));
-        }
-      }
-    } else if (townCount >= 2) {
-      hex.feature = 'dualTown';
-      // exitPairs: for dualTown revenue bubble positioning
-      const townNIs = hex.nodes.map((n, i) => n.type === 'town' ? i : null).filter(i => i !== null);
-      if (Object.keys(exitsByNode).length >= 1) {
-        hex.exitPairs = [exitsByNode[townNIs[0]] || [], exitsByNode[townNIs[1]] || []];
-      }
-    } else if (townCount === 1) {
-      hex.feature = 'town';
-    }
-  }
-
   // ── Sync phaseRevenue / activePhases from primary node ──────────────────────
   // Generic — no special-casing by feature type. First node wins, same as tobymao.
   // Offboards set these fields directly above and have no nodes[], so they are
@@ -529,10 +453,11 @@ function parseTilesBlock(content) {
   while ((m = complexRe.exec(body)) !== null) {
     const id    = m[1];
     const inner = m[2];
-    const cntM   = inner.match(/'count'\s*=>\s*(\d+)/);
+    const cntM   = inner.match(/'count'\s*=>\s*(?:'([^']*)'|(\d+))/);
     const colM   = inner.match(/'color'\s*=>\s*'([^']+)'/);
     const codeM  = inner.match(/'code'\s*=>\s*'([^']*)'/);
-    const count  = cntM ? parseInt(cntM[1]) : 1;
+    // 'unlimited' string → null (state.manifest convention); numeric → integer
+    const count  = cntM ? (cntM[1] === 'unlimited' ? null : parseInt(cntM[2] ?? cntM[1])) : 1;
     manifest[id] = count;
     if (colM || codeM) {
       customTiles[id] = {
