@@ -242,9 +242,12 @@ function _grbTrainHash(tr, variants, state) {
   kv.push(`name: ${_rbStr(label)}`);
   kv.push(`distance: ${_grbDistance(tr)}`);
   if (tr.cost != null)   kv.push(`price: ${tr.cost}`);
-  // count: null → unlimited → num: 99 (tobymao convention: >= 99 treated as unlimited)
-  if (tr.count === null) kv.push('num: 99');
-  else if (tr.count != null) kv.push(`num: ${tr.count}`);
+  // count semantics (see _rbParseTrain comments):
+  //   null  → unlimited → emit num: 99
+  //   0     → absent in source (dynamic) → omit num: entirely
+  //   N > 0 → explicit → emit num: N
+  if (tr.count === null)         kv.push('num: 99');
+  else if (tr.count > 0)         kv.push(`num: ${tr.count}`);
 
   if (tr.rusts && tr.rustsOn) {
     const tgt = allTrains.find(t => t.id === tr.rustsOn);
@@ -265,6 +268,8 @@ function _grbTrainHash(tr, variants, state) {
       const vLabel = (typeof calculateTrainLabel === 'function')
         ? calculateTrainLabel(vtr) : (vtr.label || '?');
       const vKv = [`name: ${_rbStr(vLabel)}`, `distance: ${_grbDistance(vtr)}`];
+      // multiplier: required for E-train / revenue-doubling variants (g_1822 E-train)
+      if (vtr.multiplier && vtr.multiplier > 1) vKv.push(`multiplier: ${vtr.multiplier}`);
       if (vtr.cost != null) vKv.push(`price: ${vtr.cost}`);
       if (vtr.rusts && vtr.rustsOn) {
         const vtgt = allTrains.find(t => t.id === vtr.rustsOn);
@@ -315,6 +320,7 @@ function _grbPhaseHash(ph, state) {
     brown:  ['yellow', 'green', 'brown'],
     grey:   ['yellow', 'green', 'brown', 'grey'],
     gray:   ['yellow', 'green', 'brown', 'grey'],
+    blue:   ['yellow', 'green', 'brown', 'grey', 'blue'],  // 1870-style phases
   };
   const colors = TILE_PROG[ph.tiles] || ['yellow'];
   kv.push(colors.length === 1

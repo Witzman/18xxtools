@@ -36,9 +36,12 @@ const ROUND_TRIP_GAMES = [
     name: '1822',
     tobymaoPath: 'g_1822/game.rb',
     expect: {
-      trainCount:  14,   // L, 2, 3, 4, 5, 6, 7, E (+ 2P, P+, LP variants expanded flat)
-      phaseCount:   8,
-      topLevelTrainCount: 10, // non-isVariant entries (L+2-variant = 1 top-level, etc.)
+      // L(+2-variant), 3, 4, 5, 6, 7(+E-variant), 2P, LP, 5P, P+ = 10 top-level
+      // Variants expanded flat: 2-variant of L, E-variant of 7 → 12 total in state.trains
+      trainCount:  12,
+      phaseCount:   7,
+      topLevelTrainCount: 10,
+      // known limitation: Phase 2 on:%w[2 3] → truncated to '2'; train_limit hash → integer
       sample: { trainLabel: 'L', trainCost: 60, phaseLabel: '5', phaseTiles: 'brown' },
     },
   },
@@ -46,19 +49,22 @@ const ROUND_TRIP_GAMES = [
     name: '1822PNW',
     tobymaoPath: 'g_1822_pnw/game.rb',
     expect: {
-      trainCount:  null,   // TBD — run import once and record
-      phaseCount:  null,
-      topLevelTrainCount: null,
-      sample: null,
+      // Same structure as 1822: L(+2-variant), 3, 4, 5, 6, 7(+E-variant), 2P, LP, P+
+      trainCount:  11,
+      phaseCount:   7,
+      topLevelTrainCount: 9,
+      sample: { trainLabel: 'L', trainCost: 60 },
     },
   },
   {
     name: '1830',
     tobymaoPath: 'g_1830/game.rb',
     expect: {
-      trainCount:   6,   // 2, 3, 4, 5, 6, D
+      trainCount:   6,   // 2, 3, 4, 5, 6, D — all top-level, no variants
       phaseCount:   6,
       topLevelTrainCount: 6,
+      // known loss: D-train loses available_on:'6' and discount hash (P3 fields)
+      // known loss: 6-train and D-train have no explicit num: — count=0 → num: omitted in export
       sample: { trainLabel: '2', trainCost: 80, phaseLabel: '5', phaseTiles: 'brown' },
     },
   },
@@ -66,50 +72,57 @@ const ROUND_TRIP_GAMES = [
     name: '1846',
     tobymaoPath: 'g_1846/game.rb',
     expect: {
-      trainCount:  null,   // 2, 4, 5, 6 top-level + 3/5, 4/6, 7/8 variants expanded
-      phaseCount:  null,
+      // 2, 4(+3/5-variant), 5(+4/6-variant), 6(+7/8-variant) = 4 top-level + 3 variants = 7 total
+      trainCount:   7,
+      phaseCount:   4,   // I, II, III, IV
       topLevelTrainCount: 4,
-      sample: { trainLabel: '2', trainCost: 80 },
+      // known limitation: no explicit num: on any train → count=0 → num: omitted in export
+      // known limitation: obsolete_on not captured
+      sample: { trainLabel: '2', trainCost: 80, phaseLabel: 'I', phaseTiles: 'yellow' },
     },
   },
   {
     name: '1889',
     tobymaoPath: 'g_1889/game.rb',
     expect: {
-      trainCount:  null,
-      phaseCount:  null,
-      topLevelTrainCount: null,
-      sample: null,
+      trainCount:   6,   // 2, 3, 4, 5, 6, D — all top-level
+      phaseCount:   6,
+      topLevelTrainCount: 6,
+      // fixed: D-train num:'unlimited' → count:null → exports as num: 99
+      sample: { trainLabel: '2', trainCost: 80, phaseLabel: '5', phaseTiles: 'brown' },
     },
   },
   {
     name: '1882',
     tobymaoPath: 'g_1882/game.rb',
     expect: {
-      trainCount:  null,
-      phaseCount:  null,
-      topLevelTrainCount: null,
-      sample: null,
+      trainCount:   6,   // 2, 3, 4, 5, 6, D — all top-level, clean structure
+      phaseCount:   6,
+      topLevelTrainCount: 6,
+      sample: { trainLabel: '2', trainCost: 80, phaseLabel: '2', phaseTiles: 'yellow' },
     },
   },
   {
     name: '1822MX',
     tobymaoPath: 'g_1822_mx/game.rb',
     expect: {
-      trainCount:  null,
-      phaseCount:  null,
-      topLevelTrainCount: null,
-      sample: null,
+      // L(+2-variant), 3, 4, 5, 6, 7(+E-variant), 2P, LP, 5P, P+, 3/2P = 11 top-level + 2 variants
+      trainCount:  13,
+      phaseCount:   0,   // No PHASES constant — inherits from g_1822 (correct behaviour)
+      topLevelTrainCount: 11,
+      sample: { trainLabel: 'L', trainCost: 60 },
     },
   },
   {
     name: '1870',
     tobymaoPath: 'g_1870/game.rb',
     expect: {
-      trainCount:  null,
-      phaseCount:  null,
-      topLevelTrainCount: null,
-      sample: null,
+      // fixed: falls back to STANDARD_TRAINS / STANDARD_PHASES
+      trainCount:   8,   // 2, 3, 4, 5, 6, 8, 10, 12 — all top-level, no variants
+      phaseCount:   8,
+      topLevelTrainCount: 8,
+      // known limitation: DIESEL_VARIANT_TRAINS silently ignored (game_trains() selection not modelled)
+      sample: { trainLabel: '2', trainCost: 80 },
     },
   },
 ];

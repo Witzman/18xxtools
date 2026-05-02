@@ -1266,7 +1266,15 @@ function _rbTrainEvents(hashStr) {
 function _rbParseTrain(hashStr) {
   const label  = _rbStr(hashStr, 'name')  || '';
   const cost   = _rbNum(hashStr, 'price') || 0;
-  const count  = _rbNum(hashStr, 'num')   || 0;
+  // count semantics:
+  //   null  — unlimited (num: 'unlimited' or num: 99+)
+  //   0     — no explicit num: key in source (dynamic/runtime override e.g. 1846, 1870 6-train)
+  //   N     — explicit integer num: N
+  const _numUnlimited = /\bnum:\s*['"]unlimited['"]/i.test(hashStr);
+  const _numRaw       = _rbNum(hashStr, 'num');
+  const count = _numUnlimited ? null
+              : (_numRaw !== null && _numRaw >= 99) ? null
+              : (_numRaw !== null ? _numRaw : 0);
 
   // Restrict distance-sensitive fields to the portion of the hash before any
   // variants: key so that a base train (e.g. 1822 '7' with an E-variant) does
@@ -1312,7 +1320,8 @@ function _rbParsePhase(hashStr) {
 
   // tiles: last recognized color in [:yellow,:green,...] or %i[...] or %w[...]
   // tobymao uses 'gray'; editor state uses 'grey' — normalise on import.
-  const COLOR_ORDER = ['yellow', 'green', 'brown', 'gray', 'grey'];
+  // 'blue' appears in 1870-style phases (after gray).
+  const COLOR_ORDER = ['yellow', 'green', 'brown', 'gray', 'grey', 'blue'];
   let tiles = 'yellow';
   const tm = hashStr.match(/\btiles:\s*(?:%[iw]\[([^\]]+)\]|\[([^\]]+)\])/);
   if (tm) {
@@ -1582,7 +1591,12 @@ function importGameRb(content) {
     .replace(/'\s*\\\s*\n\s*'/g, '')
     .replace(/#[^\n]*/g, '');
 
-  const trainHashes = _rbSplitHashes(_rbExtractArray(src, 'TRAINS'));
+  // TRAINS = [...] is standard; some games (e.g. 1870) use STANDARD_TRAINS instead
+  // and select between variants at runtime via game_trains().  Fall back to
+  // STANDARD_TRAINS so at least the base set round-trips; the diesel variant is
+  // a designer-facing note, not a parse target.
+  let trainHashes = _rbSplitHashes(_rbExtractArray(src, 'TRAINS'));
+  if (!trainHashes.length) trainHashes = _rbSplitHashes(_rbExtractArray(src, 'STANDARD_TRAINS'));
   const trains = [];
 
   trainHashes.forEach(hashStr => {
@@ -1611,9 +1625,10 @@ function importGameRb(content) {
     });
   });
 
-  const phases = _rbSplitHashes(_rbExtractArray(src, 'PHASES'))
-    .map(_rbParsePhase)
-    .filter(p => p.name);
+  // PHASES = [...] is standard; 1870-style games use STANDARD_PHASES.
+  let phaseHashes = _rbSplitHashes(_rbExtractArray(src, 'PHASES'));
+  if (!phaseHashes.length) phaseHashes = _rbSplitHashes(_rbExtractArray(src, 'STANDARD_PHASES'));
+  const phases = phaseHashes.map(_rbParsePhase).filter(p => p.name);
 
   // ── Cross-reference resolution ────────────────────────────────────────────
   // Step 1: train.phase ← phase.name where phase.onTrain (still a name) === train.label
