@@ -365,6 +365,11 @@ function initMechanicsState() {
       final_round:  { enabled: false, timing: 'one_more_full_or_set' },
       final_or_set: { enabled: false, timing: 'one_more_full_or_set' },
     },
+
+    // ── functionMap — populated by import-game.js on game.rb import ──────────
+    // Typed representation of every constant and method in game.rb.
+    // { [rubyName]: { type: 'const'|'ref'|'method'|'raw', ... } }
+    functionMap: {},
   };
 }
 
@@ -892,6 +897,7 @@ function renderMechanicsRight() {
       if (!gec[trigger]) gec[trigger] = { enabled: false, timing: 'full_or' };
       if (field === 'enabled') gec[trigger].enabled = e.target.checked;
       else gec[trigger].timing = e.target.value;
+      _fmWrite('GAME_END_CHECK', state.mechanics.gameEndCheck);
       if (typeof autosave === 'function') autosave();
       renderMechanicsLeft();
       renderMechanicsRight();
@@ -930,6 +936,8 @@ function renderMechanicsRight() {
       const tbl = section === 'starting' ? 'startingCash' : 'certLimit';
       state.mechanics[tbl] = state.mechanics[tbl] || {};
       state.mechanics[tbl][p] = Number(e.target.value);
+      const rubyKey = section === 'starting' ? 'STARTING_CASH' : 'CERT_LIMIT';
+      _fmWritePlayerHash(rubyKey, p, Number(e.target.value));
       if (typeof autosave === 'function') autosave();
       renderMechanicsLeft();
     });
@@ -949,6 +957,39 @@ function renderMechanicsRight() {
       const lo  = key === 'minPlayers' ? 1 : (state.mechanics.minPlayers || 1);
       const hi  = key === 'maxPlayers' ? 12 : (state.mechanics.maxPlayers || 12);
       state.mechanics[key] = Math.max(lo, Math.min(hi, cur + dir));
+      if (typeof autosave === 'function') autosave();
+      renderMechanicsLeft();
+      renderMechanicsRight();
+    });
+  });
+  // Tile lay slot field inputs (data-slotkey inside .mech-slot[data-slot-prefix])
+  el.querySelectorAll('[data-slotkey]').forEach(input => {
+    input.addEventListener('change', e => {
+      const slotEl = e.target.closest('[data-slot-prefix]');
+      if (!slotEl) return;
+      const keyPath = slotEl.dataset.slotPrefix.split('.').slice(0, -1).join('.');  // "tileLays.default"
+      const idx     = Number(slotEl.dataset.slotPrefix.split('.').pop());
+      // Navigate to the slot array in state
+      const path = keyPath.split('.');
+      let obj = state.mechanics;
+      for (const seg of path) {
+        if (!obj[seg]) obj[seg] = {};
+        obj = obj[seg];
+      }
+      if (!Array.isArray(obj)) return;
+      const slot    = obj[idx];
+      if (!slot) return;
+      const field   = e.target.dataset.slotkey;
+      if (e.target.type === 'checkbox') slot[field] = e.target.checked;
+      else if (e.target.type === 'number') slot[field] = Number(e.target.value);
+      else {
+        // Boolean selects stored as select strings need conversion
+        const v = e.target.value;
+        slot[field] = (v === 'true') ? true : (v === 'false') ? false : v;
+      }
+      // Sync to functionMap
+      const rubyKey = _tileFmKey(keyPath);
+      if (rubyKey) _fmWrite(rubyKey, obj);
       if (typeof autosave === 'function') autosave();
       renderMechanicsLeft();
       renderMechanicsRight();
@@ -1657,6 +1698,91 @@ function toggleGec(label, geckey, checked) {
 }
 
 // ---------------------------------------------------------------------------
+// functionMap live-edit helpers
+// ---------------------------------------------------------------------------
+
+// Maps every flat state.mechanics key to its Ruby constant name.
+// Used by _fmWrite to keep functionMap in sync when UI values change.
+const FLAT_TO_FM = {
+  bankCash:                 'BANK_CASH',
+  currency:                 'CURRENCY_FORMAT_STR',
+  capitalization:           'CAPITALIZATION',
+  homeTokenTiming:          'HOME_TOKEN_TIMING',
+  marketShareLimit:         'MARKET_SHARE_LIMIT',
+  trackRestriction:         'TRACK_RESTRICTION',
+  bankruptcyAllowed:        'BANKRUPTCY_ALLOWED',
+  bankruptcyEndsGameAfter:  'BANKRUPTCY_ENDS_GAME_AFTER',
+  sellBuyOrder:             'SELL_BUY_ORDER',
+  sellMovement:             'SELL_MOVEMENT',
+  poolShareDrop:            'POOL_SHARE_DROP',
+  mustSellInBlocks:         'MUST_SELL_IN_BLOCKS',
+  sellAfter:                'SELL_AFTER',
+  soldOutTopRowMovement:    'SOLD_OUT_TOP_ROW_MOVEMENT',
+  mustBuyTrain:             'MUST_BUY_TRAIN',
+  allowRemovingTowns:       'ALLOW_REMOVING_TOWNS',
+  ebuyFromOthers:           'EBUY_FROM_OTHERS',
+  ebuyDepotCheapest:        'EBUY_DEPOT_TRAIN_MUST_BE_CHEAPEST',
+  mustIssueBeforeEbuy:      'MUST_EMERGENCY_ISSUE_BEFORE_EBUY',
+  ebuyOwnerMustHelp:        'EBUY_OWNER_MUST_HELP',
+  ebuyCanSellShares:        'EBUY_CAN_SELL_SHARES',
+  ebuyPresSwap:             'EBUY_PRES_SWAP',
+  ebuyCanTakePlayerLoan:    'EBUY_CAN_TAKE_PLAYER_LOAN',
+  playerLoanInterestRate:   'PLAYER_LOAN_INTEREST_RATE',
+  playerLoanEndgamePenalty: 'PLAYER_LOAN_ENDGAME_PENALTY',
+};
+
+// Write a scalar value to functionMap[rubyKey].value.
+// If the entry doesn't exist yet (game not imported), creates a new const entry
+// using FM_SCHEMA metadata — so the export pipeline can still serialise it.
+function _fmWrite(rubyKey, value) {
+  if (typeof state === 'undefined' || !state.mechanics) return;
+  const fm = state.mechanics.functionMap;
+  if (!fm) return;
+  if (fm[rubyKey]) {
+    fm[rubyKey].value = value;
+  } else if (typeof FM_SCHEMA !== 'undefined' && FM_SCHEMA[rubyKey]) {
+    fm[rubyKey] = {
+      type:    'const',
+      emit:    FM_SCHEMA[rubyKey].emit,
+      default: FM_SCHEMA[rubyKey].default,
+      value,
+    };
+  }
+}
+
+// Write one player-count cell into a player-hash constant (STARTING_CASH / CERT_LIMIT).
+// Reads the full current flat table so the functionMap entry stays consistent.
+function _fmWritePlayerHash(rubyKey, playerCount, cellValue) {
+  if (typeof state === 'undefined' || !state.mechanics) return;
+  const fm = state.mechanics.functionMap;
+  if (!fm) return;
+  const flatKey = rubyKey === 'STARTING_CASH' ? 'startingCash' : 'certLimit';
+  const tbl     = state.mechanics[flatKey] || {};
+  if (fm[rubyKey]) {
+    fm[rubyKey].value           = Object.assign({}, tbl);
+    fm[rubyKey].value[playerCount] = cellValue;
+  } else if (typeof FM_SCHEMA !== 'undefined' && FM_SCHEMA[rubyKey]) {
+    const merged = Object.assign({}, tbl);
+    merged[playerCount] = cellValue;
+    fm[rubyKey] = {
+      type:    'const',
+      emit:    FM_SCHEMA[rubyKey].emit,
+      default: FM_SCHEMA[rubyKey].default,
+      value:   merged,
+    };
+  }
+}
+
+// Derive the Ruby constant name for a tile-lay key path
+// (tileLays.default | tileLays.byType.major | tileLays.byType.minor)
+function _tileFmKey(keyPath) {
+  if (keyPath === 'tileLays.default')       return 'TILE_LAYS';
+  if (keyPath === 'tileLays.byType.major')  return 'MAJOR_TILE_LAYS';
+  if (keyPath === 'tileLays.byType.minor')  return 'MINOR_TILE_LAYS';
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // Input change handler
 // ---------------------------------------------------------------------------
 function onMechanicsInputChange(e) {
@@ -1672,6 +1798,10 @@ function onMechanicsInputChange(e) {
   if (e.target.type === 'checkbox') obj[last] = e.target.checked;
   else if (e.target.type === 'number') obj[last] = Number(e.target.value);
   else obj[last] = e.target.value;
+
+  // Sync to functionMap (only top-level flat keys have a direct Ruby mapping)
+  const rubyKey = FLAT_TO_FM[key];
+  if (rubyKey) _fmWrite(rubyKey, obj[last]);
 
   if (typeof autosave === 'function') autosave();
   renderMechanicsLeft();
@@ -1705,6 +1835,8 @@ function onEnableOverride(keyPath) {
   let obj = state.mechanics;
   for (let i = 0; i < path.length - 1; i++) obj = obj[path[i]];
   obj[path[path.length - 1]] = [Object.assign({}, DEFAULT_TILE_LAY_SLOT)];
+  const rubyKey = _tileFmKey(keyPath);
+  if (rubyKey) _fmWrite(rubyKey, obj[path[path.length - 1]]);
   if (typeof autosave === 'function') autosave();
   renderMechanicsLeft();
   renderMechanicsRight();
@@ -1715,6 +1847,8 @@ function onRemoveOverride(keyPath) {
   let obj = state.mechanics;
   for (let i = 0; i < path.length - 1; i++) obj = obj[path[i]];
   obj[path[path.length - 1]] = null;
+  const rubyKey = _tileFmKey(keyPath);
+  if (rubyKey) _fmWrite(rubyKey, null);
   if (typeof autosave === 'function') autosave();
   renderMechanicsLeft();
 }
