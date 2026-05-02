@@ -1,4 +1,4 @@
-// js/export-game.js  v20260425a
+// js/export-game.js  v20260502a
 // Skeleton-based exporter: game.rb and entities.rb.
 //
 // Replaces:  export-entities.js  +  generateGameRb() in mechanics-panel.js
@@ -56,9 +56,6 @@ function _rbNumArr(arr) {
 }
 function _rbCashNum(n) {
   return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, '_');
-}
-function _rbCashTableFilled(tbl) {
-  return tbl && Object.values(tbl).some(v => v > 0);
 }
 
 // ── Tile-lay slot → Ruby hash literal ────────────────────────────────────────
@@ -388,23 +385,24 @@ const _GRB_MODULES = [
   {
     id: 'bank',
     emit(state) {
-      const m = state.mechanics || {};
-      const lines = [];
-      if (m.bankCash)
-        lines.push(`BANK_CASH = ${_rbCashNum(m.bankCash)}`);
+      const m      = state.mechanics || {};
+      const min    = m.minPlayers ?? 2;
+      const max    = m.maxPlayers ?? 6;
+      const pRange = Array.from({ length: max - min + 1 }, (_, i) => min + i);
+      const lines  = [];
+
+      lines.push(`PLAYERS_RANGE = [${min}, ${max}]`);
+      lines.push(`BANK_CASH = ${_rbCashNum(m.bankCash ?? 12000)}`);
       if (m.currency && m.currency !== '$%s')
         lines.push(`CURRENCY_FORMAT_STR = '${m.currency}'`);
-      if (_rbCashTableFilled(m.startingCash)) {
-        const e = Object.entries(m.startingCash).filter(([,v]) => v > 0)
-          .map(([p, v]) => `${p} => ${v}`).join(', ');
-        lines.push(`STARTING_CASH = { ${e} }.freeze`);
-      }
-      if (_rbCashTableFilled(m.certLimit)) {
-        const e = Object.entries(m.certLimit).filter(([,v]) => v > 0)
-          .map(([p, v]) => `${p} => ${v}`).join(', ');
-        lines.push(`CERT_LIMIT = { ${e} }.freeze`);
-      }
-      return lines.length ? { bank: lines.join('\n') } : null;
+
+      const sc  = m.startingCash || {};
+      lines.push(`STARTING_CASH = { ${pRange.map(p => `${p} => ${sc[p] ?? 0}`).join(', ')} }.freeze`);
+
+      const cl  = m.certLimit || {};
+      lines.push(`CERT_LIMIT = { ${pRange.map(p => `${p} => ${cl[p] ?? 0}`).join(', ')} }.freeze`);
+
+      return { bank: lines.join('\n') };
     },
   },
 
