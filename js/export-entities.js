@@ -76,7 +76,7 @@ function _eiAbilityLine(ab) {
   if (ab.terrain)                                 push('terrain',          _eiStr(ab.terrain));
   if (ab.tiles && ab.tiles.length)                push('tiles',            _eiStrArr(ab.tiles));
   if (ab.corporation)                             push('corporation',      _eiStr(ab.corporation));
-  if (ab.shares && ab.shares.length)              push('shares',           _eiStrArr(ab.shares));
+  if (ab.shares != null)                           push('shares', Array.isArray(ab.shares) ? _eiStrArr(ab.shares) : _eiStr(ab.shares));
   if (ab.description)                             push('description',      _eiStr(ab.description));
   if (ab.closed_when_used_up != null)             push('closed_when_used_up', ab.closed_when_used_up ? 'true' : 'false');
   if (ab.free      != null)                       push('free',             ab.free      ? 'true' : 'false');

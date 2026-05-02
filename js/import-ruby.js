@@ -1106,7 +1106,12 @@ function _rbParseCompany(hashStr) {
   const exchAb  = abilities.find(a => a.type === 'exchange' && a.from === 'par');
   const isConc  = !!exchAb;
 
-  const desc = _rbStr(hashStr, 'desc') || '';
+  // desc: fields in Ruby entities.rb use single-quoted strings that may contain
+  // " (not a terminator in single-quoted strings) and \' (escaped apostrophe).
+  // _rbStr's [^'"]* stops at both, so use a proper single-quoted-string regex.
+  const _descM = hashStr.match(/\bdesc:\s*'((?:[^'\\]|\\.)*)'/) ||
+                 hashStr.match(/\bdesc:\s*"([^"]*)"/);
+  const desc = _descM ? _descM[1].replace(/\\'/g, "'") : '';
   let buyerType = 'any';
   if (/^CANNOT\s+BE\s+ACQUIRED/i.test(desc)) buyerType = 'no_acquire';
   else if (/^MAJOR\/MINOR[,\s]/i.test(desc)) buyerType = 'major_minor';
@@ -1179,7 +1184,7 @@ function importEntitiesRb(content) {
 
   const privates = _rbSplitHashes(_rbExtractArray(src, 'COMPANIES'))
     .map(_rbParseCompany)
-    .filter(p => !p.name.startsWith('MINOR:'));
+    .filter(p => !/^(MINOR|REGIONAL):/.test(p.name));
 
   const corpsByType = {};
   _rbSplitHashes(_rbExtractArray(src, 'CORPORATIONS')).forEach(hashStr => {
