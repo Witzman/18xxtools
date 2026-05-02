@@ -106,7 +106,7 @@ function _rbAbility(ab) {
   if (ab.terrain)              p('terrain',      _rbStr(ab.terrain));
   if (ab.tiles?.length)        p('tiles',        _rbStrArr(ab.tiles));
   if (ab.corporation)          p('corporation',  _rbStr(ab.corporation));
-  if (ab.shares?.length)       p('shares',       _rbStrArr(ab.shares));
+  if (ab.shares != null)       p('shares', Array.isArray(ab.shares) ? _rbStrArr(ab.shares) : _rbStr(ab.shares));
   if (ab.description)          p('description',  _rbStr(ab.description));
   if (ab.on_phase)             p('on_phase',     _rbStr(ab.on_phase));
   if (ab.closed_when_used_up != null)
