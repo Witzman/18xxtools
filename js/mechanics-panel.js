@@ -486,7 +486,7 @@ function validateAbilityCorporation() {
 }
 function validateExchangeTokenCorps() {
   const errors = [];
-  if (!state.mechanics || !state.mechanics.exchangeTokens.enabled) return errors;
+  if (!state.mechanics || !state.mechanics.exchangeTokens || !state.mechanics.exchangeTokens.enabled) return errors;
   const majors = majorCorpSyms();
   Object.keys(state.mechanics.exchangeTokens.counts).forEach(sym => {
     if (!majors.has(sym))
