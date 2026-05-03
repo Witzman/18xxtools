@@ -840,23 +840,8 @@
 
     </div><!-- end mechanicsView -->
 
-    <!-- ── STEPS PANEL (Addy + Tim) — placeholder while the redesign lands ─── -->
-    <div id="stepsView" style="display:none; flex:1; flex-direction:column; min-width:0; overflow:hidden; background:var(--bg-base); align-items:center; justify-content:center; padding:48px 32px;">
-      <div style="max-width:640px; text-align:center; color:var(--text-main, #ccc); line-height:1.6;">
-        <h2 style="margin:0 0 16px 0; font-weight:500; letter-spacing:.04em;">Round Steps</h2>
-        <p style="margin:0 0 12px 0;">Redesign in progress.</p>
-        <p style="margin:0 0 16px 0; font-size:13px; color:#888;">
-          The previous editor lived inside the Mechanics panel and exposed engine class names
-          directly. The new design treats round steps as <em>derived</em> from your other
-          choices &mdash; companies, abilities, phases, and game-end conditions &mdash; with
-          guided wizards on each round type and a structured override path for custom flows.
-        </p>
-        <p style="margin:0; font-size:12px; color:#666;">
-          See <code>STEPS_INFERENCE.md</code> at the repo root for the in-flight spec.
-          Coordination: Addy (steps), Tim (round classes), Jenny (abilities), Farrah (phases), Evan (mechanics).
-        </p>
-      </div>
-    </div><!-- end stepsView -->
+    <!-- ── STEPS PANEL (Addy + Tim) — populated by renderStepsPanelView() ─── -->
+    <div id="stepsView" style="display:none; flex:1; flex-direction:column; min-width:0; overflow-y:auto; background:var(--bg-base); padding:24px 32px;"></div>
 
     <!-- game.rb preview overlay (hidden until peek button clicked) -->
     <div id="mechRbOverlay" style="display:none;">
@@ -1278,7 +1263,7 @@
 <script src="js/mechanics-panel.js?v=20260503b"></script>
 
 <!-- ── Tim + Addy: Rounds Panel ──────────────────────────────────────────── -->
-<script src="js/rounds-panel.js?v=20260503c"></script>
+<script src="js/rounds-panel.js?v=20260503d"></script>
 
 <script src="js/import-game.js?v=20260425a"></script>
 <script src="js/export-game.js?v=20260503a"></script>
