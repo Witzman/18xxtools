@@ -61,11 +61,13 @@ A designer opens this tool, fills in the map, companies, trains, phases, and auc
 
 ### Phase 2 — Operating Mechanics
 
-- [ ] **Round structure definition**
-  - Number of stock rounds per set
-  - Number of operating rounds per set (or phase-driven)
-  - Initial auctions before first SR (1822-style concession round)
-  - Export shape: `OPERATING_ROUNDS`, `STOCK_ROUNDS`, round class selection
+- [ ] **Round structure definition** *(Tim — round system)*
+  - Initial round selector. Drives the `init_round` method body (not a class constant): `Round::Auction` + waterfall step, `Round::Draft` + draft step, or `Round::Stock` directly with auction folded into the bidbox (1822-style).
+  - Stock-round count per set. Vanilla = 1; >1 requires a custom `next_round!` that splices an extra SR back-to-back.
+  - Operating-round count is **phase-driven** — already authored by Farrah in Trains & Phases via `operating_rounds:` per phase entry. The engine rebinds `@operating_rounds = @phase.operating_rounds` at every SR→OR transition. There is no global `OPERATING_ROUNDS` constant.
+  - Optional inserted rounds: `Round::Choices` between SR and OR (1822 P9-style choose hook), `Round::Merger` between OR turns or after the OR set (1817 / 1867 patterns), `Round::Draft` substituted for SR (1846 2-player draft-and-OR loop until all companies drafted). Each splices into `next_round!` differently.
+  - Optional `OPERATING_ROUND_NAME` override (default `'Operating'`).
+  - Export shape: emits a game-specific `init_round`, `new_*_round` factory methods, and a `next_round!` override only when the loop departs from base. **No `OPERATING_ROUNDS` or `STOCK_ROUNDS` engine constants exist** — the prior plan entries were aspirational.
 
 - [ ] **Minor company merge rules**
   - Minors fold into associated major on float (1822/PNW model)
@@ -106,10 +108,10 @@ A designer opens this tool, fills in the map, companies, trains, phases, and auc
 - [ ] **game.rb template**
   - `BANK`, `CERT_LIMIT`, `STARTING_CASH`
   - Phase and train constants
-  - Operating round class (stub with route logic placeholders)
-  - Stock round class
-  - Merge round class (if minors present)
-  - Initial auction / concession round class
+  - Round factories: `stock_round`, `operating_round`, optionally `new_auction_round` / `new_draft_round` / `new_merger_round`. Most games use the vanilla `Engine::Round::*` classes and customize via the **steps array** passed in. Subclass only when round-level state or hooks are needed — e.g. 1822's SR `finish_round` bidbox settlement (`g_1822/round/stock.rb`), 1846's OR receivership auto-actions (`g_1846/round/operating.rb`).
+  - `next_round!` override only when the round loop departs from the vanilla `init → SR → OR×N → SR …` cycle. Patterns to support: 1822 (SR → Choices → OR×N), 1846-2p (Draft ↔ OR sets until drafted, then standard), 1817 (OR → Merger → Acquisition → next OR), 1867 (OR → conditional Merger by phase).
+  - Concrete `Round::Merger` subclass when merger rounds are configured — `Engine::Round::Merger` is abstract (`round_name` raises `NotImplementedError`), so the export must generate a named subclass with its step list.
+  - Initial auction / concession entry: `init_round` method body, returning whichever round class the designer picked.
 
 - [ ] **game.json export** (tobymao manifest format)
   - `title`, `players`, `bank`, `cert_limit`, etc.
@@ -240,6 +242,7 @@ A designer opens this tool, fills in the map, companies, trains, phases, and auc
 | Apr 2026 | **Concessions** — type toggle, linked major, blocks hexes, min bid adjust |
 | Apr 2026 | **Associated minors** — `associatedMajor` field, rail badge, datalist autocomplete |
 | Apr 2026 | Entities audit — 112 games, 31 ability types catalogued |
+| May 2026 | Round system audit (Tim) — corrected `OPERATING_ROUNDS`/`STOCK_ROUNDS` claims (no such constants); documented round-class subclass vs steps-array customization split; identified 1822/1846/1817/1867 `next_round!` patterns to support |
 
 ---
 
