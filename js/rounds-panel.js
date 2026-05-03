@@ -1,4 +1,4 @@
-// js/rounds-panel.js  v20260503c
+// js/rounds-panel.js  v20260503d
 // Rounds panel — round class selection and step list editing.
 //
 // Co-owned: Tim (round-system) + Addy (step-system).
@@ -296,6 +296,55 @@ function _renderSubclassEditor(roundType, r) {
 // not modify; ping if a change is needed at the boundary.
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Step group classification — Group A non-blocking ("interrupt menu, available
+// throughout the turn"), Group B blocking ("in sequence, top-to-bottom is the
+// play timeline"). Verified against each step's `blocks?` method:
+//   bankrupt.rb:20, end_game.rb:21, exchange.rb:19, special_track.rb:31,
+//   discard_train.rb (no override → false), issue_shares.rb (no override → defaults vary)
+// BuyCompany is conditional: vanilla `blocks?` reads `@opts[:blocks]` so the
+// SAME class is Group A by default and Group B when opts.blocks === true.
+const _STEP_GROUP = {
+  // Group A — non-blocking
+  'Engine::Step::Bankrupt':            'A',
+  'Engine::Step::EndGame':             'A',
+  'Engine::Step::Exchange':            'A',
+  'Engine::Step::SpecialTrack':        'A',
+  'Engine::Step::SpecialToken':        'A',
+  'Engine::Step::DiscardTrain':        'A',
+  'Engine::Step::IssueShares':         'A',
+  'Engine::Step::BuyCompany':          'A',  // → 'B' when opts.blocks === true
+  // Group B — blocking (gates round progression)
+  'Engine::Step::HomeToken':           'B',
+  'Engine::Step::Track':               'B',
+  'Engine::Step::Token':               'B',
+  'Engine::Step::Route':               'B',
+  'Engine::Step::Dividend':            'B',
+  'Engine::Step::BuyTrain':            'B',
+  'Engine::Step::TrackAndToken':       'B',
+  'Engine::Step::BuySellParShares':    'B',
+  'Engine::Step::WaterfallAuction':    'B',
+  'Engine::Step::ConcessionAuction':   'B',
+  'Engine::Step::SimpleDraft':         'B',
+  'Engine::Step::CompanyPendingPar':   'B',
+};
+
+// True iff this entry blocks round progression. Conditional on opts.blocks.
+function _stepIsBlocking(stepEntry) {
+  if (stepEntry && stepEntry.opts && stepEntry.opts.blocks === true) return true;
+  return _STEP_GROUP[stepEntry && stepEntry.class] === 'B';
+}
+
+// Splits a step list into { groupA: [...], groupB: [...] } preserving each
+// entry's index in the original array (so reorder/remove can target it).
+function _classifySteps(steps) {
+  const groupA = [];
+  const groupB = [];
+  (steps || []).forEach((entry, originalIdx) => {
+    (_stepIsBlocking(entry) ? groupB : groupA).push({ entry, originalIdx });
+  });
+  return { groupA, groupB };
+}
+
 // Catalog of vanilla Engine::Step::* classes — full class name → short
 // description (matches each step's `description` method in lib/engine/step/*.rb).
 // Used for inline labels in step cards. Custom G<game>::Step::* names fall
@@ -363,73 +412,115 @@ function _renderRoundStepsSection(roundType, r) {
   const defaults   = _BASE_RB_DEFAULTS[roundType] || [];
   const methodName = _stepsRoundMethodName(roundType);
   const matches    = _stepsMatchDefaults(userSteps, defaults);
+  const { groupA, groupB } = _classifySteps(userSteps);
 
   const lines = [];
-  lines.push(`<div class="rounds-steps-section" data-round-type="${roundType}">`);
-  lines.push(`  <h4 class="rounds-section-title">Steps</h4>`);
+  lines.push(`<div class="rounds-steps-section" data-round-type="${roundType}" style="margin-top:16px;">`);
 
-  // Inheritance hint — if the array exactly matches base.rb defaults, the
-  // emitter omits the round method entirely (silent inherit). Lets the designer
-  // know they're on the canonical path.
+  // Inheritance hint
   if (matches) {
-    lines.push(`  <p class="mech-hint">Matches base.rb default — <code>def ${methodName}</code> will be omitted from the export.</p>`);
+    lines.push(`  <p class="mech-hint" style="margin:0 0 12px;">Matches base.rb default — <code>def ${methodName}</code> will be omitted from the export.</p>`);
   } else if (userSteps.length === 0 && roundType === 'merger') {
-    lines.push(`  <p class="mech-hint">Merger rounds have no engine default. Add at least one step.</p>`);
+    lines.push(`  <p class="mech-hint" style="margin:0 0 12px;">Merger rounds have no engine default. Add at least one step.</p>`);
   } else if (userSteps.length === 0) {
-    lines.push(`  <p class="mech-hint" style="font-style:italic;">No steps. Use the picker below to add one.</p>`);
+    lines.push(`  <p class="mech-hint" style="margin:0 0 12px; font-style:italic;">No steps. Use the picker below to add one.</p>`);
   } else {
-    lines.push(`  <p class="mech-hint">Diverges from base.rb default — <code>def ${methodName}</code> will be emitted with this list.</p>`);
+    lines.push(`  <p class="mech-hint" style="margin:0 0 12px;">Diverges from base.rb default — <code>def ${methodName}</code> will be emitted with this list.</p>`);
   }
 
-  // Editable step list — always editable. Cards render with up/down/blocks/×.
-  if (userSteps.length > 0) {
-    lines.push(`  <ol class="rounds-steps-list">`);
-    userSteps.forEach((s, i) => lines.push('    ' + _renderStepCardEditable(s, i, roundType, userSteps.length)));
-    lines.push(`  </ol>`);
+  // ── Group A — pool of pills (non-blocking, "always available") ────────────
+  lines.push('  <div class="mech-slot" style="margin-bottom:12px;">');
+  lines.push('    <div class="mech-slot-num">Available throughout the turn — non-blocking</div>');
+  lines.push('    <p class="mech-hint" style="margin:0 0 6px;">Order doesn\'t matter; the engine treats these as actions a player may take at any moment during their turn.</p>');
+  if (groupA.length > 0) {
+    lines.push('    <div style="display:flex;flex-wrap:wrap;gap:6px;">');
+    groupA.forEach(({ entry, originalIdx }) => {
+      lines.push('      ' + _renderStepPillGroupA(entry, originalIdx, roundType));
+    });
+    lines.push('    </div>');
+  } else {
+    lines.push('    <p class="mech-hint" style="margin:0;font-style:italic;">No interrupt-menu steps yet.</p>');
   }
+  lines.push('  </div>');
 
-  // Add-step picker: <select> populated from _STEP_CATALOG + "+ Add" button.
-  // Same class can be selected twice (BuyCompany twice in 1830 OR pattern).
-  lines.push('  <div class="rounds-steps-picker">');
-  lines.push('    <select data-step-picker>');
-  lines.push('      <option value="">Select a step…</option>');
+  // ── Group B — sequenced cards (blocking, "in play timeline") ──────────────
+  lines.push('  <div class="mech-slot" style="margin-bottom:12px;">');
+  lines.push('    <div class="mech-slot-num">In sequence — blocking, top-to-bottom is play timeline</div>');
+  lines.push('    <p class="mech-hint" style="margin:0 0 8px;">The round walks these top-to-bottom and stops at each one until the player acts. Order is the play sequence.</p>');
+  if (groupB.length > 0) {
+    lines.push('    <ol style="list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:6px;">');
+    groupB.forEach(({ entry, originalIdx }, visibleIdx) => {
+      lines.push('      ' + _renderStepCardGroupB(entry, originalIdx, roundType, visibleIdx, groupB.length));
+    });
+    lines.push('    </ol>');
+  } else {
+    lines.push('    <p class="mech-hint" style="margin:0;font-style:italic;">No sequenced steps yet.</p>');
+  }
+  lines.push('  </div>');
+
+  // Add-step picker. Group placement is automatic via _stepIsBlocking().
+  lines.push('  <div class="rounds-steps-picker" style="display:flex;gap:8px;align-items:center;margin-top:8px;">');
+  lines.push('    <select data-step-picker style="background:#1e1e1e;border:1px solid #444;border-radius:4px;color:#ddd;padding:4px 8px;font-size:12px;flex:1;max-width:380px;">');
+  lines.push('      <option value="">Select a step to add…</option>');
   Object.keys(_STEP_CATALOG).sort().forEach(cls => {
     const short = _stepShortName(cls);
     const desc  = _STEP_CATALOG[cls];
-    lines.push(`      <option value="${cls}">${short} — ${desc}</option>`);
+    const grp   = _STEP_GROUP[cls] === 'B' ? '◆' : '○';
+    lines.push(`      <option value="${cls}">${grp} ${short} — ${desc}</option>`);
   });
   lines.push('    </select>');
   lines.push(`    <button class="mech-btn-small" data-skey="add" data-round-type="${roundType}">+ Add step</button>`);
+  lines.push('    <span class="mech-hint-inline">○ non-blocking · ◆ blocking</span>');
   lines.push('  </div>');
 
   lines.push(`</div>`);
   return lines.join('\n');
 }
 
-// One step card rendered as an editable entry. Controls (left → right):
-//   ▲▼ reorder | name + desc | { opts } | blocks toggle | × remove
-// All buttons carry data-skey + data-round-type + data-step-index for the
-// onRoundsStepAction dispatcher (in the shared section below).
-function _renderStepCardEditable(stepEntry, index, roundType, total) {
+// Group A pill — small inline chip with name + remove. Order is irrelevant.
+// BuyCompany shows a "blocks" toggle so the user can promote it to Group B.
+function _renderStepPillGroupA(stepEntry, originalIdx, roundType) {
+  const name      = _stepShortName(stepEntry.class);
+  const desc      = _STEP_CATALOG[stepEntry.class] || '';
+  const canBlock  = stepEntry.class === 'Engine::Step::BuyCompany';
+  const blocksOn  = !!(stepEntry.opts && stepEntry.opts.blocks);
+  return `<span class="rounds-step-pill" title="${desc}" style="display:inline-flex;align-items:center;gap:4px;background:#1e1e1e;border:1px solid #3a3a3a;border-radius:14px;padding:3px 4px 3px 10px;font-size:11px;color:#ddd;">` +
+    `<span>${name}</span>` +
+    (canBlock ? `<button class="rounds-step-blocks-pill${blocksOn ? ' active' : ''}" data-skey="toggle-blocks" data-round-type="${roundType}" data-step-index="${originalIdx}" title="Promote to In-sequence with { blocks: true }" style="background:${blocksOn ? '#4338ca' : 'transparent'};border:1px solid ${blocksOn ? '#6366f1' : '#444'};color:${blocksOn ? '#fff' : '#888'};border-radius:10px;padding:0 6px;font-size:10px;cursor:pointer;line-height:14px;">blocks</button>` : '') +
+    `<button class="rounds-step-remove" data-skey="remove" data-round-type="${roundType}" data-step-index="${originalIdx}" title="Remove" style="background:transparent;border:none;color:#888;font-size:14px;cursor:pointer;padding:0 4px;line-height:1;">×</button>` +
+  `</span>`;
+}
+
+// Group B card — numbered, with reorder and remove. BuyCompany shows the
+// blocks toggle here too (active by default since it's already in Group B).
+function _renderStepCardGroupB(stepEntry, originalIdx, roundType, visibleIdx, total) {
   const name     = _stepShortName(stepEntry.class);
   const desc     = _STEP_CATALOG[stepEntry.class] || '';
   const optsStr  = _formatStepOptsInline(stepEntry.opts);
+  const isFirst  = visibleIdx === 0;
+  const isLast   = visibleIdx === total - 1;
+  const canBlock = stepEntry.class === 'Engine::Step::BuyCompany';
   const blocksOn = !!(stepEntry.opts && stepEntry.opts.blocks);
-  const isFirst  = index === 0;
-  const isLast   = index === total - 1;
 
-  return `<li class="rounds-step-card" data-step-index="${index}">` +
-    `<span class="rounds-step-reorder">` +
-      `<button class="rounds-step-up" data-skey="move-up" data-round-type="${roundType}" data-step-index="${index}"${isFirst ? ' disabled' : ''} title="Move up">▲</button>` +
-      `<button class="rounds-step-down" data-skey="move-down" data-round-type="${roundType}" data-step-index="${index}"${isLast ? ' disabled' : ''} title="Move down">▼</button>` +
+  return `<li data-step-index="${originalIdx}" style="display:flex;align-items:center;gap:8px;background:#1a1a1a;border:1px solid #2a2a2a;border-radius:5px;padding:6px 10px;font-size:12px;color:#ddd;">` +
+    `<span style="color:#666;font-size:10px;width:14px;flex-shrink:0;text-align:right;">${visibleIdx + 1}</span>` +
+    `<span style="display:flex;flex-direction:column;gap:1px;">` +
+      `<button data-skey="move-up" data-round-type="${roundType}" data-step-index="${originalIdx}" ${isFirst ? 'disabled' : ''} title="Move up" style="background:transparent;border:1px solid #333;color:${isFirst ? '#333' : '#888'};border-radius:3px;padding:0 4px;font-size:9px;cursor:${isFirst ? 'default' : 'pointer'};line-height:11px;">▲</button>` +
+      `<button data-skey="move-down" data-round-type="${roundType}" data-step-index="${originalIdx}" ${isLast ? 'disabled' : ''} title="Move down" style="background:transparent;border:1px solid #333;color:${isLast ? '#333' : '#888'};border-radius:3px;padding:0 4px;font-size:9px;cursor:${isLast ? 'default' : 'pointer'};line-height:11px;">▼</button>` +
     `</span>` +
-    `<span class="rounds-step-name">${name}</span>` +
-    (desc ? ` <span class="rounds-step-desc">— ${desc}</span>` : '') +
-    (optsStr ? ` <span class="rounds-step-opts">{ ${optsStr} }</span>` : '') +
-    `<button class="rounds-step-blocks${blocksOn ? ' active' : ''}" data-skey="toggle-blocks" data-round-type="${roundType}" data-step-index="${index}" title="Toggle { blocks: true } — gates round progression on explicit pass (e.g. 1830 OR's trailing BuyCompany)">${blocksOn ? 'blocks ✓' : 'blocks'}</button>` +
-    `<button class="rounds-step-remove" data-skey="remove" data-round-type="${roundType}" data-step-index="${index}" title="Remove">×</button>` +
+    `<span style="font-weight:500;">${name}</span>` +
+    (desc ? ` <span style="color:#888;font-size:11px;">— ${desc}</span>` : '') +
+    (optsStr ? ` <span style="color:#7a7a7a;font-family:monospace;font-size:10px;">{ ${optsStr} }</span>` : '') +
+    `<span style="margin-left:auto;display:flex;gap:4px;">` +
+      (canBlock ? `<button class="rounds-step-blocks-pill${blocksOn ? ' active' : ''}" data-skey="toggle-blocks" data-round-type="${roundType}" data-step-index="${originalIdx}" title="Toggle { blocks: true }" style="background:${blocksOn ? '#4338ca' : 'transparent'};border:1px solid ${blocksOn ? '#6366f1' : '#444'};color:${blocksOn ? '#fff' : '#888'};border-radius:10px;padding:1px 8px;font-size:10px;cursor:pointer;">${blocksOn ? 'blocks ✓' : 'blocks'}</button>` : '') +
+      `<button data-skey="remove" data-round-type="${roundType}" data-step-index="${originalIdx}" title="Remove" style="background:transparent;border:1px solid #4a2a2a;color:#c88;border-radius:3px;padding:1px 8px;font-size:11px;cursor:pointer;">×</button>` +
+    `</span>` +
   `</li>`;
 }
+
+// (Old `_renderStepCardEditable` was a single flat-list card — superseded by
+// the two-tier rendering above. Group A entries render as pills, Group B as
+// numbered cards.)
 
 // Compares two step arrays for content equality. Used to decide whether the
 // user has diverged from base.rb defaults (controls the inheritance hint).
@@ -536,6 +627,8 @@ function onRoundsStepAction(e) {
   }
 
   if (typeof autosave              === 'function') autosave();
+  // Re-render whichever main view is currently active.
+  if (_stepsViewIsVisible() && typeof renderStepsPanelView === 'function') renderStepsPanelView();
   if (typeof renderMechanicsRight  === 'function') renderMechanicsRight();
   if (typeof renderMechanicsLeft   === 'function') renderMechanicsLeft();
   if (typeof _refreshRbPreviewIfOpen === 'function') _refreshRbPreviewIfOpen();
@@ -557,6 +650,150 @@ function _refreshRbPreviewIfOpen() {
 // ─────────────────────────────────────────────────────────────────────────────
 // ── Shared (both must agree to edit) ────────────────────────────────────────
 // ─────────────────────────────────────────────────────────────────────────────
+
+// ── Wizard prose (placeholder content; co-write with Anthony for v1.x) ──────
+// Each tab's "How does this round work?" card opens with this copy. Plain 18xx
+// terms, no engine class names. Real prose is its own deliverable per
+// STEPS_INFERENCE.md §10.
+const _WIZARD_PROSE = {
+  initial: `<p>The Initial round runs once at game start. Players acquire the private companies that will be available — by bidding (1830), drafting (1846), or face-value purchase (1822 bidbox). The round ends when every private has an owner.</p>
+            <p>Most games inherit the engine default (Waterfall Auction). Change the round class above only if your game uses a different startup mechanism — draft, certificate selection, or a fully custom flow.</p>
+            <p style="color:#888;font-size:11px;font-style:italic;">Wizard prose is a placeholder. Anthony to co-author final copy.</p>`,
+  stock: `<p>Stock rounds let players buy and sell company shares, par new corporations, and (in some games) exchange privates for shares of their linked majors.</p>
+          <p>The order of actions matters less here — most stock-round steps are non-blocking interrupts. A player may declare bankruptcy, exchange a company, or trigger a private's special ability at any point during their turn.</p>
+          <p style="color:#888;font-size:11px;font-style:italic;">Wizard prose is a placeholder. Anthony to co-author final copy.</p>`,
+  operating: `<p>Operating rounds are the heart of every 18xx game. Each company in turn lays track, places station tokens, runs trains, pays or withholds dividends, and buys new trains.</p>
+              <p>The <strong>blocking sequence</strong> below (Track → Token → Route → Dividend → Buy Train, etc.) is the play timeline — a company resolves each step in order before the round moves on. The <strong>interrupt menu</strong> above (Bankruptcy, Exchange, Special Track/Token, early BuyCompany, DiscardTrain) is available throughout — a player may take any of those actions at any moment during their turn.</p>
+              <p>Bankruptcy isn't "first" in time — it's a non-blocking action available throughout. The button is always offered; the engine only allows it when the corp actually qualifies.</p>
+              <p style="color:#888;font-size:11px;font-style:italic;">Wizard prose is a placeholder. Anthony to co-author final copy.</p>`,
+  merger: `<p>Merger rounds happen when game mechanics require companies to fold or combine — typically in 1817-style games. The structure depends entirely on the merger flow your game uses.</p>
+           <p>Merger rounds are always game-specific; the engine has no default. You'll need a custom round subclass and a step list reflecting your particular merger flow.</p>
+           <p style="color:#888;font-size:11px;font-style:italic;">Wizard prose is a placeholder. Anthony to co-author final copy.</p>`,
+};
+
+// Per-round wizard collapsed state. Module-local; not persisted to state.
+// Default: open on first visit so users see the explanation. Closing it
+// remembers the choice for the duration of the session.
+let _wizardCollapsed = { initial: false, stock: false, operating: false, merger: false };
+
+const _ROUND_LABELS = {
+  initial:   'Initial Round',
+  stock:     'Stock Round',
+  operating: 'Operating Round',
+  merger:    'Merger Round',
+};
+
+// ── Top-level STEPS panel renderer (replaces #stepsView innerHTML) ──────────
+// Called by wireStepsPanel() on icon click and after every state mutation that
+// affects step lists. Builds the full panel: title, sub-tabs, wizard, class
+// section (Tim), step section (Addy two-tier), live game.rb preview.
+function renderStepsPanelView() {
+  const view = document.getElementById('stepsView');
+  if (!view) return;
+  initRoundsState();
+  const activeTab = _activeRoundsTab || 'initial';
+  const rounds    = (typeof state !== 'undefined' && state.mechanics && state.mechanics.rounds) || {};
+  const r         = rounds[activeTab] || {};
+
+  view.innerHTML = [
+    '<div style="max-width:980px;margin:0 auto;">',
+    `  <h2 style="margin:0 0 4px 0;font-weight:500;letter-spacing:.04em;color:#ddd;">Round Steps</h2>`,
+    `  <p class="mech-hint" style="margin:0 0 16px;">Configure the order of actions in each round. Empty step lists fall through to base.rb defaults.</p>`,
+    `  <div class="corp-tab-bar" style="margin-bottom:0;">`,
+         _ROUND_SUB_TABS.map(t =>
+           `    <button type="button" class="corp-tab-btn${t.id === activeTab ? ' active' : ''}" data-rounds-tab="${t.id}">${t.label}</button>`
+         ).join('\n'),
+    '  </div>',
+    `  <div style="border:1px solid var(--border, #2a2a2a);border-top:none;border-radius:0 0 6px 6px;padding:18px 20px;background:var(--bg-panel, #161616);">`,
+         _renderWizardCard(activeTab, r),
+         _renderRoundClassSection(activeTab, r),
+         _renderRoundStepsSection(activeTab, r),
+         _renderStepsPreviewPane(activeTab, r),
+    '  </div>',
+    '</div>',
+  ].join('\n');
+
+  _attachStepsListeners(view);
+}
+
+// Wizard card — collapsible explainer. Auto-open on first visit per session;
+// dismissible; reopenable via the "How does this round work?" pill button.
+function _renderWizardCard(roundType, _r) {
+  const collapsed = !!_wizardCollapsed[roundType];
+  const label     = _ROUND_LABELS[roundType] || 'Round';
+
+  if (collapsed) {
+    return `<div style="margin-bottom:16px;">
+      <button class="mech-btn-small" data-wizard-toggle="${roundType}" title="Show the wizard explainer for this round">ⓘ How does the ${label} work?</button>
+    </div>`;
+  }
+
+  return `<div style="margin-bottom:18px;background:#16213a;border:1px solid #2a3a5a;border-left:4px solid #4a6dc7;border-radius:5px;padding:12px 14px;">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+      <strong style="color:#a5b4fc;font-size:13px;letter-spacing:.03em;">ⓘ How the ${label} works</strong>
+      <button class="mech-btn-small" data-wizard-toggle="${roundType}" title="Hide this explainer">Hide</button>
+    </div>
+    <div style="color:#c8d4f0;font-size:12px;line-height:1.6;">${_WIZARD_PROSE[roundType] || ''}</div>
+  </div>`;
+}
+
+// Live game.rb preview — shows the actual `def <round>` block this tab's
+// configuration will emit. Updates on every state mutation.
+function _renderStepsPreviewPane(roundType, _r) {
+  const methodName = _stepsRoundMethodName(roundType);
+  let body = '';
+  try {
+    if (typeof renderGameRb === 'function') {
+      const full = renderGameRb();
+      // Best-effort extract of the round method body. Falls back to full game.rb.
+      const re = new RegExp('def\\s+' + methodName + '[^\\n]*\\n[\\s\\S]*?\\n\\s*end', 'm');
+      const m = full.match(re);
+      body = m ? m[0] : `# def ${methodName} not emitted — likely matches base.rb default (silent inherit).`;
+    } else {
+      body = '# export-game.js not loaded yet.';
+    }
+  } catch (e) {
+    body = '# Preview render error: ' + (e && e.message);
+  }
+
+  const escaped = body.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return `<div style="margin-top:16px;">
+    <div class="mech-slot-num" style="margin-bottom:6px;">Live preview — game.rb output for this round</div>
+    <pre style="background:#0d0d0d;border:1px solid #2a2a2a;border-radius:5px;padding:12px 14px;margin:0;font-family:monospace;font-size:11px;line-height:1.55;color:#bbb;overflow-x:auto;white-space:pre;">${escaped}</pre>
+  </div>`;
+}
+
+// Re-attach event listeners after every render. Mirror of mechanics-panel.js's
+// approach — innerHTML wipe destroys old listeners, so re-bind here.
+function _attachStepsListeners(root) {
+  if (!root) return;
+  root.querySelectorAll('[data-rkey]').forEach(input => {
+    input.addEventListener('change', onRoundsInputChange);
+  });
+  root.querySelectorAll('[data-rounds-tab]').forEach(btn => {
+    btn.addEventListener('click', onRoundsTabClick);
+  });
+  root.querySelectorAll('[data-skey]').forEach(btn => {
+    btn.addEventListener('click', onRoundsStepAction);
+  });
+  root.querySelectorAll('[data-wizard-toggle]').forEach(btn => {
+    btn.addEventListener('click', onWizardToggle);
+  });
+}
+
+function onWizardToggle(e) {
+  const t = e.currentTarget && e.currentTarget.dataset && e.currentTarget.dataset.wizardToggle;
+  if (!t) return;
+  _wizardCollapsed[t] = !_wizardCollapsed[t];
+  renderStepsPanelView();
+}
+
+// Returns true if the STEPS panel is the currently-visible main view. Used by
+// rounds mutation handlers to decide whether to re-render this view.
+function _stepsViewIsVisible() {
+  const view = document.getElementById('stepsView');
+  return !!(view && view.style.display !== 'none' && view.style.display !== '');
+}
 
 // ── Top-level STEPS panel wiring ────────────────────────────────────────────
 // The Rounds editor lived inside Mechanics through PR1c. Per Anthony's spec,
@@ -595,6 +832,10 @@ function wireStepsPanel() {
 
     const view = document.getElementById('stepsView');
     if (view) view.style.display = 'flex';
+
+    // Render the panel content. innerHTML is rewritten on every show so the
+    // user always sees current state (post-import, post-state-mutation, etc.).
+    renderStepsPanelView();
   });
 
   // Other nav buttons should hide stepsView the same way they hide mechanicsView.
@@ -623,6 +864,7 @@ function onRoundsTabClick(e) {
   const tab = e.currentTarget && e.currentTarget.dataset && e.currentTarget.dataset.roundsTab;
   if (!tab) return;
   _activeRoundsTab = tab;
+  if (_stepsViewIsVisible() && typeof renderStepsPanelView === 'function') renderStepsPanelView();
   if (typeof renderMechanicsRight === 'function') renderMechanicsRight();
 }
 
@@ -668,8 +910,11 @@ function onRoundsInputChange(e) {
   }
 
   if (typeof autosave === 'function') autosave();
+  // Re-render whichever main view is currently active.
+  if (_stepsViewIsVisible() && typeof renderStepsPanelView === 'function') renderStepsPanelView();
   if (typeof renderMechanicsRight === 'function') renderMechanicsRight();
   if (typeof renderMechanicsLeft  === 'function') renderMechanicsLeft();
+  if (typeof _refreshRbPreviewIfOpen === 'function') _refreshRbPreviewIfOpen();
 }
 
 function _coerceRoundsFormValue(input) {

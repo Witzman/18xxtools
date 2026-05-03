@@ -1,8 +1,12 @@
-# Steps Panel — Inference-Driven Design (v0)
+# Steps Panel — Inference-Driven Design (v1, partial)
 
-> **Status:** Draft for cross-panel review. Do not implement yet.
+> **Status:** v1 partial consolidation. Tim and Evan have annotated; Jenny and
+> Farrah are pending. Per Anthony's directive, panel scaffold ships in parallel
+> with the inference engine work. Cells tied to Jenny's / Farrah's surfaces are
+> marked **[Pending]** and their inference rules are stubbed in code with
+> TODO comments referencing this doc's row numbers.
 > **Owner:** Addy (steps).
-> **Co-authors needed:** Jenny (abilities), Farrah (phases / events), Tim (round classes), Evan (mechanics flags).
+> **Co-authors:** Tim ✓, Evan ✓, Jenny [Pending], Farrah [Pending].
 > **Last updated:** 2026-05-03.
 
 ---
@@ -66,7 +70,7 @@ This is the v0 mapping. Every entry must be reviewed by the upstream panel's own
 | 5 | Any corp/minor with `coordinates` empty/null OR with multiple `home_token_locations`     | `Engine::Step::HomeToken`                                       | B     | OR       | Jenny            | See §3 below for the second case (reserved-tile deferred placement). |
 | 6 | Any reserved hex on the map AND owning corp has `coordinates` set to it                   | `Engine::Step::HomeToken`                                       | B     | OR       | Max (map) + Jenny | Also queues `pending_tokens` per `base.rb:1685`. |
 | 7 | Any phase has `status: ['can_buy_companies']` OR `'can_buy_companies_from_other_players'`| `Engine::Step::BuyCompany` (early, non-blocking)                | A     | OR       | Farrah           | The trailing `[BuyCompany, {blocks:true}]` is separate — see §4. |
-| 8 | `state.mechanics.orSteps.issueShares === true` (or replacement flag once migrated)        | `Engine::Step::IssueShares`                                     | A     | OR       | Evan             | Used by 18Chesapeake, 1846, 1817. |
+| 8 | `state.mechanics.orSteps.issueShares === true`                                            | `Engine::Step::IssueShares`                                     | A     | OR       | Evan             | Used by 18Chesapeake, 1846, 1817. `orSteps.*` is permanent source-of-truth — `rounds.<type>.steps` is a projection. See annotation below. |
 
 > [Evan]: `orSteps.*` are permanent source-of-truth — do not migrate the data into `rounds.<type>.steps`. The rounds array is a projection: the inference engine reads `orSteps.issueShares` and materialises a step entry with `source: { auto: 'evan.mechanics.orSteps.issueShares' }`. When the toggle is off, the inference removes the entry. The toggle itself never goes away. The §10 "migration shim" Tim + Addy own is a lazy display-initialisation pass only — first time the Steps panel opens, if `rounds.operating.steps` is empty, walk `orSteps.*` and pre-populate auto-sourced entries. Nothing is deleted or deprecated. Remove "or replacement flag once migrated" from this cell — it implies a data restructuring that isn't happening. Forward note: `orSteps.homeToken` and `orSteps.specialToken` may eventually be superseded by Jenny's corp/ability inference (rows 5, 3); if so, those two flags become redundant. That's a future deprecation decision, not v0.
 | 9 | Any phase declares `status: ['limited_train_buy']`                                       | `Engine::Step::SingleDepotTrainBuy` (replaces `BuyTrain`)       | B     | OR       | Farrah           | Mutually exclusive with default `BuyTrain`. |
