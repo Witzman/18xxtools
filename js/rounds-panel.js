@@ -500,6 +500,13 @@ function _renderStepCardGroupB(stepEntry, originalIdx, roundType, visibleIdx, to
   const isLast   = visibleIdx === total - 1;
   const canBlock = stepEntry.class === 'Engine::Step::BuyCompany';
   const blocksOn = !!(stepEntry.opts && stepEntry.opts.blocks);
+  // The Dividend step gets a "Rules" pill that opens the dividend-rules modal.
+  // Owned by js/dividend-rules.js (market-mechanics SME). State lives on
+  // stepEntry.priceMovement (recipe + half-pay + minor branch + price floor).
+  const isDividend = stepEntry.class === 'Engine::Step::Dividend' || /::Dividend$/.test(stepEntry.class || '');
+  const ruleBadge  = isDividend && typeof priceMovementBadge === 'function'
+    ? priceMovementBadge(stepEntry) : null;
+  const rulesOn    = !!ruleBadge;
 
   return `<li data-step-index="${originalIdx}" style="display:flex;align-items:center;gap:8px;background:var(--bg-surface);border:1px solid var(--border);border-radius:5px;padding:6px 10px;font-size:12px;color:var(--text-primary);">` +
     `<span style="color:var(--text-muted);font-size:10px;width:14px;flex-shrink:0;text-align:right;">${visibleIdx + 1}</span>` +
@@ -511,6 +518,7 @@ function _renderStepCardGroupB(stepEntry, originalIdx, roundType, visibleIdx, to
     (desc ? ` <span style="color:var(--text-dim);font-size:11px;">— ${desc}</span>` : '') +
     (optsStr ? ` <span style="color:var(--text-muted);font-family:monospace;font-size:10px;">{ ${optsStr} }</span>` : '') +
     `<span style="margin-left:auto;display:flex;gap:4px;">` +
+      (isDividend ? `<button data-skey="edit-rules" data-round-type="${roundType}" data-step-index="${originalIdx}" title="Configure price movement and half-pay" style="background:${rulesOn ? 'var(--accent)' : 'transparent'};border:1px solid ${rulesOn ? 'var(--accent)' : 'var(--border-mid)'};color:${rulesOn ? '#fff' : 'var(--text-dim)'};border-radius:10px;padding:1px 8px;font-size:10px;cursor:pointer;">Rules${rulesOn ? `: ${ruleBadge}` : ''}</button>` : '') +
       (canBlock ? `<button class="rounds-step-blocks-pill${blocksOn ? ' active' : ''}" data-skey="toggle-blocks" data-round-type="${roundType}" data-step-index="${originalIdx}" title="Toggle { blocks: true }" style="background:${blocksOn ? 'var(--accent)' : 'transparent'};border:1px solid ${blocksOn ? 'var(--accent)' : 'var(--border-mid)'};color:${blocksOn ? '#fff' : 'var(--text-dim)'};border-radius:10px;padding:1px 8px;font-size:10px;cursor:pointer;">${blocksOn ? 'blocks ✓' : 'blocks'}</button>` : '') +
       `<button data-skey="remove" data-round-type="${roundType}" data-step-index="${originalIdx}" title="Remove" style="background:transparent;border:1px solid var(--border);color:var(--text-secondary);border-radius:3px;padding:1px 8px;font-size:11px;cursor:pointer;">×</button>` +
     `</span>` +
@@ -620,6 +628,20 @@ function onRoundsStepAction(e) {
         entry.opts = opts;
       }
       break;
+    }
+    case 'edit-rules': {
+      // Open the dividend rules modal (owned by js/dividend-rules.js).
+      // Modal manages its own state — return early so we don't double-render.
+      if (Number.isNaN(idx) || idx < 0 || idx >= slot.steps.length) return;
+      const entry = slot.steps[idx];
+      if (typeof openDividendRulesModal !== 'function') return;
+      openDividendRulesModal(entry, () => {
+        if (typeof autosave === 'function') autosave();
+        if (_stepsViewIsVisible() && typeof renderStepsPanelView === 'function') renderStepsPanelView();
+        if (typeof renderMechanicsRight === 'function') renderMechanicsRight();
+        if (typeof _refreshRbPreviewIfOpen === 'function') _refreshRbPreviewIfOpen();
+      });
+      return;
     }
     default:
       return;  // unknown action — no-op rather than throw
