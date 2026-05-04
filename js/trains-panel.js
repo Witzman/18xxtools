@@ -251,7 +251,7 @@ function renderTrainsTable() {
     addRow.className = 'add-row-inline';
     addRow.innerHTML = `
         <td colspan="8" style="padding: 0;">
-            <button id="inlineAddTrainBtn" style="width: 100%; padding: 12px; background: transparent; border: none; color: #888; font-weight: 500; text-transform: uppercase; letter-spacing: 0.1em; cursor: pointer; transition: background 0.2s, color 0.2s;">
+            <button id="inlineAddTrainBtn" style="width: 100%; padding: 12px; background: transparent; border: none; color: var(--text-dim); font-weight: 500; text-transform: uppercase; letter-spacing: 0.1em; cursor: pointer; transition: background 0.2s, color 0.2s;">
                 + Add Train
             </button>
         </td>
@@ -276,8 +276,8 @@ function renderTrainsTable() {
             renderTrainsTable();
             autosave();
         });
-        addTrainBtn.addEventListener('mouseenter', () => { addTrainBtn.style.color = '#ccc'; addTrainBtn.style.background = 'rgba(255,255,255,0.04)'; });
-        addTrainBtn.addEventListener('mouseleave', () => { addTrainBtn.style.color = '#888'; addTrainBtn.style.background = 'transparent'; });
+        addTrainBtn.addEventListener('mouseenter', () => { addTrainBtn.style.color = 'var(--text-primary)'; addTrainBtn.style.background = 'var(--bg-elevated)'; });
+        addTrainBtn.addEventListener('mouseleave', () => { addTrainBtn.style.color = 'var(--text-dim)'; addTrainBtn.style.background = 'transparent'; });
     }
 }
 
@@ -290,7 +290,7 @@ function renderRustSliver(tr) {
     if (!target) return '';
     const targetLabel = calculateTrainLabel(target);
     const targetPhase = state.phases.find(p => p.name === target.phase);
-    const bgColor = targetPhase ? (targetPhase.color || '#444') : '#444';
+    const bgColor = targetPhase ? (targetPhase.color || 'var(--border-mid)') : 'var(--border-mid)';
     return `<div class="rust-sliver" style="background:${bgColor};"><span class="emoji">🚄</span> ${targetLabel}</div>`;
 }
 
@@ -342,7 +342,7 @@ function renderDistSubInputs(tr, container) {
                 </label>
                 <label style="display:flex;align-items:center;gap:4px;cursor:pointer;margin-top:2px;">
                     <input type="number" class="d-mult" value="${multVal}" min="1" style="width:36px;" title="Revenue multiplier (e.g. 2 = double)">
-                    <span style="color:#777;">×</span>
+                    <span style="color:var(--text-dim);">×</span>
                 </label>
             </div>
         `;
@@ -436,7 +436,7 @@ function renderPhasesTable() {
     addPhaseRow.className = 'add-row-inline';
     addPhaseRow.innerHTML = `
         <td colspan="8" style="padding: 0;">
-            <button id="inlineAddPhaseBtn" style="width: 100%; padding: 12px; background: transparent; border: none; color: #888; font-weight: 500; text-transform: uppercase; letter-spacing: 0.1em; cursor: pointer; transition: background 0.2s, color 0.2s;">
+            <button id="inlineAddPhaseBtn" style="width: 100%; padding: 12px; background: transparent; border: none; color: var(--text-dim); font-weight: 500; text-transform: uppercase; letter-spacing: 0.1em; cursor: pointer; transition: background 0.2s, color 0.2s;">
                 + Add Phase
             </button>
         </td>
@@ -452,8 +452,8 @@ function renderPhasesTable() {
             renderPhasesTable();
             autosave();
         });
-        addPhaseBtn.addEventListener('mouseenter', () => { addPhaseBtn.style.color = '#ccc'; addPhaseBtn.style.background = 'rgba(255,255,255,0.04)'; });
-        addPhaseBtn.addEventListener('mouseleave', () => { addPhaseBtn.style.color = '#888'; addPhaseBtn.style.background = 'transparent'; });
+        addPhaseBtn.addEventListener('mouseenter', () => { addPhaseBtn.style.color = 'var(--text-primary)'; addPhaseBtn.style.background = 'var(--bg-elevated)'; });
+        addPhaseBtn.addEventListener('mouseleave', () => { addPhaseBtn.style.color = 'var(--text-dim)'; addPhaseBtn.style.background = 'transparent'; });
     }
 }
 
