@@ -1,27 +1,25 @@
-// js/rounds-panel.js  v20260504a
+// js/rounds-panel.js  v20260504b
 // Rounds panel — round class selection and step list editing.
 //
-// Co-owned: Tim (round-system) + Addy (step-system).
-//
 // Each sub-tab (Initial / Stock / Operating / Merger) renders two stacked
-// halves with a clear ownership boundary:
+// halves:
 //
-//   ── Tim PR1a:  _renderRoundClassSection(roundType, r) ────────────────────
+//   _renderRoundClassSection(roundType, r)
 //     class selector, constructor opts, custom subclass override editor
-//   ── Addy PR1b: _renderRoundStepsSection(roundType, r) ────────────────────
+//   _renderRoundStepsSection(roundType, r)
 //     ordered list of steps with per-entry options (allows duplicates,
 //     e.g. BuyCompany twice in 1830 OR — early non-blocking + late blocks:true)
 //
 // State source: state.mechanics.rounds.{initial, stock, operating, merger}.
-//   Seeded by Evan in initMechanicsState() (mechanics-panel.js, PR0).
-//   Tim writes:  rounds.<type>.{class, opts, subclass}
-//   Addy writes: rounds.<type>.steps
-//   Top-level:   rounds.{loop, customNextRound}
+//   Seeded by initMechanicsState() in mechanics-panel.js.
+//   Class slot writes: rounds.<type>.{class, opts, subclass}
+//   Step slot writes:  rounds.<type>.steps
+//   Top-level:         rounds.{loop, customNextRound}
 //
-// Export consumer: export-game.js (PR1a) emits
+// Export consumer: export-game.js emits
 //   def init_round / def stock_round / def operating_round / def next_round!
-//   into the {{SLOT_ROUND_METHODS}} slot (added by Evan in PR0), calling
-//   _grbStepArrayLiteral(stepArr) (Addy, PR1b) to serialize step arrays.
+//   into the {{SLOT_ROUND_METHODS}} slot, calling _grbStepArrayLiteral(stepArr)
+//   to serialize step arrays.
 //
 // Load order: after mechanics-panel.js (depends on state.mechanics.rounds),
 //             before export-game.js (the consumer).
@@ -29,15 +27,15 @@
 'use strict';
 
 // ── State init / migration ──────────────────────────────────────────────────
-// state.mechanics.rounds is seeded by Evan's initMechanicsState() for fresh
-// states. For existing saves that predate the rounds schema, we seed defaults
-// here on first access. Step arrays are also seeded from _BASE_RB_DEFAULTS
-// (Addy's catalog, defined later in this file — same module scope, so it's
-// accessible at call time even though declared below) so her step-list
+// state.mechanics.rounds is seeded by initMechanicsState() (mechanics-panel.js)
+// for fresh states. For existing saves that predate the rounds schema, we seed
+// defaults here on first access. Step arrays are also seeded from
+// _BASE_RB_DEFAULTS (declared later in this file — same module scope, so it's
+// accessible at call time even though declared below) so the step-list
 // renderer can be purely reactive against state without re-deriving defaults.
 //
 // Legacy-field migration (initialRound, stockRoundsPerSet, mergerRound,
-// orSteps → rounds.*) lands in PR1a/PR1b.
+// orSteps → rounds.*) is pending.
 function initRoundsState() {
   if (typeof state === 'undefined' || !state.mechanics) return;
   if (!state.mechanics.rounds) {
@@ -51,11 +49,12 @@ function initRoundsState() {
     };
   }
 
-  // Seed step arrays from _BASE_RB_DEFAULTS (declared in Addy's section below).
-  // Same-file module scope — `const _BASE_RB_DEFAULTS` is hoisted at evaluation
-  // time and resolves at runtime; only fails inside the temporal dead zone,
-  // which doesn't apply here (initRoundsState is called after module load).
-  // Defensive deep-copy each entry so user edits don't mutate the catalog.
+  // Seed step arrays from _BASE_RB_DEFAULTS (declared in the step-list section
+  // below). Same-file module scope — `const _BASE_RB_DEFAULTS` is hoisted at
+  // evaluation time and resolves at runtime; only fails inside the temporal
+  // dead zone, which doesn't apply here (initRoundsState is called after
+  // module load). Defensive deep-copy each entry so user edits don't mutate
+  // the catalog.
   if (typeof _BASE_RB_DEFAULTS !== 'undefined') {
     ['initial', 'stock', 'operating'].forEach(type => {
       const slot = state.mechanics.rounds[type] || (state.mechanics.rounds[type] = {});
@@ -66,16 +65,16 @@ function initRoundsState() {
         }));
       }
     });
-    // merger: no engine default (always game-custom). Initialize as empty array
-    // so Addy's renderer can iterate without null-checks.
+    // merger: no engine default (always game-custom). Initialize as empty
+    // array so the renderer can iterate without null-checks.
     if (state.mechanics.rounds.merger && !Array.isArray(state.mechanics.rounds.merger.steps)) {
       state.mechanics.rounds.merger.steps = [];
     }
   }
 
-  // TODO (Tim + Addy, PR1c): migrate legacy state.mechanics.{initialRound,
-  // stockRoundsPerSet, mergerRound, orSteps} into state.mechanics.rounds.* and
-  // remove the legacy keys.
+  // TODO: migrate legacy state.mechanics.{initialRound, stockRoundsPerSet,
+  // mergerRound, orSteps} into state.mechanics.rounds.* and remove the legacy
+  // keys.
 }
 
 // ── Top-level panel renderer ────────────────────────────────────────────────
@@ -97,7 +96,7 @@ function renderRoundsPanel() {
   return [
     '<div class="rounds-panel">',
     '  <h3>Rounds</h3>',
-    '  <p class="mech-hint">Class section (Tim) on top, Step list (Addy) below. Empty step lists fall through to base.rb defaults — no Ruby is emitted.</p>',
+    '  <p class="mech-hint">Class section on top, step list below. Empty step lists fall through to base.rb defaults — no Ruby is emitted.</p>',
     `  <div class="rounds-tabs">${tabs}</div>`,
     `  <div class="rounds-tab-content">${_renderRoundSubTab(_activeRoundsTab)}</div>`,
     '</div>',
@@ -106,8 +105,8 @@ function renderRoundsPanel() {
 
 // ── Sub-tab entry points ────────────────────────────────────────────────────
 // Each sub-tab renderer is a thin orchestrator: it pulls the round slot from
-// state, then composes Tim's class section + Addy's steps section. Editing
-// either section's content happens inside its dedicated helper below — this
+// state, then composes the class section and the step section. Editing either
+// section's content happens inside its dedicated helper below — this
 // orchestrator stays stable to keep diffs scoped.
 
 function renderInitialRoundTab()   { return _renderRoundSubTab('initial'); }
@@ -120,15 +119,15 @@ function _renderRoundSubTab(roundType) {
   const rounds = (typeof state !== 'undefined' && state.mechanics && state.mechanics.rounds) || {};
   const r = rounds[roundType] || {};
   return [
-    _renderRoundClassSection(roundType, r),  // ── Tim ──
-    _renderRoundStepsSection(roundType, r),  // ── Addy ──
+    _renderRoundClassSection(roundType, r),
+    _renderRoundStepsSection(roundType, r),
   ].join('\n');
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ── Tim's surface (PR1a) ────────────────────────────────────────────────────
-// Edits below this line up to the next divider belong to Tim. Addy: please do
-// not modify; ping if a change is needed at the boundary.
+// ── Round-class section ─────────────────────────────────────────────────────
+// Class selectors, constructor opts, and custom-subclass override editor for
+// each round type. Pairs with the step-list section below.
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Tobymao round-class registry. Designer choices map to engine classes:
@@ -856,9 +855,9 @@ if (typeof document !== 'undefined') {
   }
 }
 
-// Listener handlers — attached by mechanics-panel.js after each renderRight.
-// Tim wires data-rkey writers + sub-tab clicks here in PR1a; Addy will add a
-// data-skey listener for step add/remove/reorder in PR1c.
+// Listener handlers — attached by mechanics-panel.js after each renderRight,
+// and by _attachStepsListeners after each STEPS panel render. Wires data-rkey
+// writers (round class, opts, subclass) and sub-tab click navigation.
 
 function onRoundsTabClick(e) {
   const tab = e.currentTarget && e.currentTarget.dataset && e.currentTarget.dataset.roundsTab;
