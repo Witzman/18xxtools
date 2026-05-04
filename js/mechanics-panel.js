@@ -496,7 +496,7 @@ function validateExchangeTokenCorps() {
 }
 function validateMergerAssociations() {
   const errors = [];
-  if (!state.mechanics || !state.mechanics.merger.enabled) return errors;
+  if (!state.mechanics || !state.mechanics.merger || !state.mechanics.merger.enabled) return errors;
   const minors = allMinorSyms();
   const majors = majorCorpSyms();
   state.mechanics.merger.associations.forEach(pair => {

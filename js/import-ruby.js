@@ -2023,7 +2023,14 @@ function applyGameImport(content, sourceName) {
   state.trains = trains;
   state.phases = phases;
   if (mechanics && Object.keys(mechanics).length) {
-    if (!state.mechanics) state.mechanics = (typeof defaultMechanics === 'function') ? defaultMechanics() : {};
+    if (!state.mechanics) {
+      // initMechanicsState (mechanics-panel.js) seeds the full schema including
+      // nested objects like .merger, .nationalization, .orSteps, etc.  The old
+      // defaultMechanics fallback was never defined, leaving state.mechanics as {}
+      // and crashing validateMergerAssociations on .merger.enabled.
+      if (typeof initMechanicsState === 'function') initMechanicsState();
+      else state.mechanics = {};
+    }
     // Merge mechanics fields — preserve functionMap so Jenny's COMPANIES ref and any
     // other agent registrations are not overwritten by a game.rb import.
     const existingFunctionMap = state.mechanics.functionMap;
