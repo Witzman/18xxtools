@@ -1,4 +1,4 @@
-// js/rounds-panel.js  v20260504d
+// js/rounds-panel.js  v20260504e
 // Rounds panel — round class selection and step list editing.
 //
 // Each sub-tab (Initial / Stock / Operating / Merger) renders two stacked
@@ -922,6 +922,140 @@ const _END_HOOK_TARGETS = {
   merger:    { method: 'finish_round',       subclass: true,  hint: 'Per-game merger cleanup logic.' },
 };
 
+// Round End preset catalog. Each entry is a starting-point body the designer
+// can paste into endHook.body via the preset dropdown in the Tier C accordion.
+// Bodies are bare statements (no `def` wrapper) — the emit module wraps them
+// per the per-tab method name from _END_HOOK_TARGETS.
+//
+// applicableTabs gates which preset shows up in which sub-tab's dropdown:
+//   round-subclass targets (Stock/Init/Merger): finish_round / setup bodies
+//   game-class targets    (Operating):          or_round_finished bodies
+//
+// Every body is ported verbatim from a tobymao source file — see `source` for
+// the file:line reference. RCA discipline: read source first, no invention.
+const _ROUND_END_PRESETS = [
+  {
+    id:    '1822_stock_bidbox',
+    label: '1822-style bidbox settlement',
+    description:
+      'Float minors, settle concession/private bids, refill bidbox, accrue ' +
+      'player loan interest. Calls round-subclass helpers (highest_bid, ' +
+      'buy_company, float_minor, remove_l_trains, remove_minor_and_first_train) ' +
+      'that you must port from g_1822/round/stock.rb.',
+    applicableTabs: ['stock', 'initial', 'merger'],
+    source: 'lib/engine/game/g_1822/round/stock.rb:45-97',
+    body:
+      "return @game.end_game!(:dnf) if @game.class::GAME_END_ON_NOTHING_SOLD_IN_SR1 && @game.nothing_sold_in_sr?\n" +
+      "\n" +
+      "float_minors = []\n" +
+      "minor_count = 0\n" +
+      "remove_l_count = 0\n" +
+      "remove_minor = nil\n" +
+      "@game.bidbox_minors.each_with_index do |minor, index|\n" +
+      "  if (bid = highest_bid(minor))\n" +
+      "    float_minors << [bid, index]\n" +
+      "  else\n" +
+      "    minor.owner = nil\n" +
+      "    remove_l_count += 1\n" +
+      "    remove_minor = minor if index.zero?\n" +
+      "  end\n" +
+      "  minor_count += 1\n" +
+      "end\n" +
+      "\n" +
+      "@game.bidbox_concessions.each do |concessions|\n" +
+      "  if (bid = highest_bid(concessions))\n" +
+      "    buy_company(bid)\n" +
+      "  else\n" +
+      "    concessions.owner = nil\n" +
+      "  end\n" +
+      "end\n" +
+      "\n" +
+      "@game.bidbox_privates.each do |company|\n" +
+      "  if (bid = highest_bid(company))\n" +
+      "    buy_company(bid)\n" +
+      "  else\n" +
+      "    company.owner = nil\n" +
+      "  end\n" +
+      "end\n" +
+      "\n" +
+      "# Sort the minors first according to bid price, highest first. If a tie, lowest index first\n" +
+      "float_minors.sort_by { |m| [m[0].price, minor_count - m[1]] }.reverse_each do |arr|\n" +
+      "  float_minor(arr[0])\n" +
+      "end\n" +
+      "\n" +
+      "# Every minor with no bids will export a L/2 train. If no bid on first minors bidbox an additional\n" +
+      "# train will be exported, additionally the minor is also removed from the game.\n" +
+      "remove_l_trains(remove_l_count) if remove_l_count.positive? && @game.depot.upcoming.first.name == 'L'\n" +
+      "remove_minor_and_first_train(remove_minor) if remove_minor\n" +
+      "\n" +
+      "# Refill the minors bidbox\n" +
+      "@game.bidbox_minors_refill!\n" +
+      "\n" +
+      "# Increase player loans with 50% interest\n" +
+      "@game.add_interest_player_loans!\n" +
+      "\n" +
+      "super",
+  },
+  {
+    id:    '1817_or_export',
+    label: '1817-style train export every OR',
+    description:
+      'Unconditional end-of-OR train export. Exports all 2-trains when the ' +
+      'next train is a 2; otherwise exports one train. Ported from ' +
+      'g_1817/game.rb#or_round_finished.',
+    applicableTabs: ['operating'],
+    source: 'lib/engine/game/g_1817/game.rb:980-988',
+    body:
+      "return if @depot.upcoming.empty?\n" +
+      "\n" +
+      "if @depot.upcoming.first.name == '2'\n" +
+      "  depot.export_all!('2')\n" +
+      "else\n" +
+      "  depot.export!\n" +
+      "end",
+  },
+  {
+    id:    '1867_phase_export',
+    label: '1867-style phase-gated train export',
+    description:
+      'End-of-OR train export gated on the `export_train` phase status. ' +
+      'When active, exports one train, processes the post-train-buy hook, ' +
+      'and runs game-end check. Ported from g_1867/game.rb#or_round_finished.',
+    applicableTabs: ['operating'],
+    source: 'lib/engine/game/g_1867/game.rb:879-885',
+    body:
+      "return unless @phase.status.include?('export_train')\n" +
+      "\n" +
+      "depot.export!\n" +
+      "post_train_buy\n" +
+      "game_end_check",
+  },
+  {
+    id:    '1861_noop',
+    label: '1861-style explicit no-op',
+    description:
+      'Explicit empty `or_round_finished` — equivalent to inheriting the ' +
+      'engine default but documents intent. Use when the parent class would ' +
+      'otherwise inherit a hook you want to disable. Ported from ' +
+      'g_1861/game.rb#or_round_finished.',
+    applicableTabs: ['operating'],
+    source: 'lib/engine/game/g_1861/game.rb:288',
+    body: '',
+  },
+];
+
+// Filter presets for a sub-tab. Returns presets whose applicableTabs includes
+// the round type. Used by the Tier C dropdown.
+function _presetsForTab(roundType) {
+  return _ROUND_END_PRESETS.filter(p => p.applicableTabs.includes(roundType));
+}
+
+// Lookup a preset by id. Returns null when not found.
+function _findPresetById(id) {
+  if (!id) return null;
+  return _ROUND_END_PRESETS.find(p => p.id === id) || null;
+}
+
 // Tier C accordion collapsed-state per round. Module-local; not persisted.
 // Defaults to collapsed (advanced section).
 let _tierCCollapsed = { initial: true, stock: true, operating: true, merger: true };
@@ -990,13 +1124,29 @@ function _renderEndHookEditor(roundType, endHook) {
   lines.push(`  <div class="mech-slot-num">Round End — <code>def ${target.method}</code> ${target.subclass ? 'on the round subclass' : 'on the game class'}</div>`);
   lines.push(`  <p class="mech-hint" style="margin:0 0 8px;">${target.hint}</p>`);
 
-  // Preset picker — placeholder for v2 (presets list ships separately).
-  lines.push('  <label style="font-size:11px;color:var(--text-dim);">Starting from a preset');
-  lines.push(`    <select data-rkey="${roundType}.endHook.preset" style="background:var(--bg-elevated);border:1px solid var(--border-mid);border-radius:4px;color:var(--text-primary);padding:3px 6px;font-size:11px;max-width:280px;">`);
-  lines.push('      <option value="">Custom (start blank)</option>');
-  lines.push('      <option value="" disabled>(common patterns coming in v2 — 1822 bidbox, 1817 export, 1867 phase-gated, 1861 no-op)</option>');
-  lines.push('    </select>');
-  lines.push('  </label>');
+  // Preset picker — filtered to presets whose target matches this sub-tab.
+  // Selecting a preset populates the body textarea below if currently empty
+  // (see onRoundsInputChange's preset handling). Bodies are ported verbatim
+  // from tobymao source — see _ROUND_END_PRESETS for file:line refs.
+  const presets    = _presetsForTab(roundType);
+  const currentPid = (endHook && endHook.preset) || '';
+  if (presets.length > 0) {
+    lines.push('  <label style="font-size:11px;color:var(--text-dim);">Starting from a preset');
+    lines.push(`    <select data-rkey="${roundType}.endHook.preset" style="background:var(--bg-elevated);border:1px solid var(--border-mid);border-radius:4px;color:var(--text-primary);padding:3px 6px;font-size:11px;max-width:280px;">`);
+    lines.push(`      <option value="" ${currentPid === '' ? 'selected' : ''}>Custom (start blank)</option>`);
+    presets.forEach(p => {
+      const sel = currentPid === p.id ? 'selected' : '';
+      lines.push(`      <option value="${p.id}" ${sel}>${p.label}</option>`);
+    });
+    lines.push('    </select>');
+    lines.push('  </label>');
+    // Description for the currently-picked preset (helps users understand
+    // what they're getting before they apply / edit).
+    const activePreset = _findPresetById(currentPid);
+    if (activePreset) {
+      lines.push(`  <p class="mech-hint" style="margin:4px 0 6px;font-size:10px;line-height:1.5;">${activePreset.description} <span style="color:var(--text-dim);">Source: <code>${activePreset.source}</code></span></p>`);
+    }
+  }
 
   // Subclass name field — only on tabs whose endHook generates a subclass.
   if (target.subclass) {
@@ -1136,16 +1286,29 @@ if (typeof document !== 'undefined') {
 
 // ── Round-flow diagram ──────────────────────────────────────────────────────
 // Pill row above the sub-tabs. Renders the assembled `next_round!` topology:
-// Init → SR → OR×N → (Merger if enabled) → ↻ SR. Each node is a click-to-tab
+// Init → SR → OR×N → (Merger if present) → ↻ SR. Each node is a click-to-tab
 // shortcut (uses the existing data-rounds-tab handler), and gets a "*" suffix
 // + accent border when its tab has a non-empty transitionHook (i.e. its
 // when-branch in the assembled `def next_round!` has been customized).
+//
+// Merger node gate: `state.mechanics.rounds.merger != null`. The slot is set
+// to null when disabled and an object when enabled (toggle handler pattern in
+// onRoundsInputChange).
+//
+// OR×N count: derived from state.phases[].operating_rounds at render time.
+// 18xx games configure OR count per-phase (`phase.operating_rounds: N`); the
+// engine binds `@operating_rounds = @phase.operating_rounds` at each
+// SR→OR transition (base.rb:2925). The diagram displays:
+//   "OR"        when no phases or all phases have 1 OR
+//   "OR×N"      when all configured phases have the same N>1
+//   "OR×N–M"    when phases vary
 function _renderRoundFlowDiagram(rounds, activeTab) {
-  const initTrans   = _slotHasTransition(rounds.initial);
-  const stockTrans  = _slotHasTransition(rounds.stock);
-  const opTrans     = _slotHasTransition(rounds.operating);
-  const mergerEnabled = !!(rounds.merger && rounds.merger.enabled);
-  const mergerTrans = mergerEnabled && _slotHasTransition(rounds.merger);
+  const initTrans     = _slotHasTransition(rounds.initial);
+  const stockTrans    = _slotHasTransition(rounds.stock);
+  const opTrans       = _slotHasTransition(rounds.operating);
+  const mergerPresent = rounds.merger != null;
+  const mergerTrans   = mergerPresent && _slotHasTransition(rounds.merger);
+  const orLabel       = _orFlowLabel();
 
   const node = (label, modified, type) => {
     const isActive = type === activeTab;
@@ -1162,9 +1325,9 @@ function _renderRoundFlowDiagram(rounds, activeTab) {
     arrow,
     node('SR', stockTrans, 'stock'),
     arrow,
-    node('OR×N', opTrans, 'operating'),
+    node(orLabel, opTrans, 'operating'),
   ];
-  if (mergerEnabled) {
+  if (mergerPresent) {
     parts.push(arrow, node('Merger', mergerTrans, 'merger'));
   }
   parts.push('<span style="color:var(--text-dim);font-family:monospace;">↻ SR</span>');
@@ -1180,6 +1343,23 @@ function _renderRoundFlowDiagram(rounds, activeTab) {
 
 function _slotHasTransition(slot) {
   return !!(slot && slot.transitionHook && slot.transitionHook.body && slot.transitionHook.body.trim());
+}
+
+// Compute the OR-node label from configured phases. Tolerates both
+// `operating_rounds` (snake_case from .rb import) and `operatingRounds`
+// (camelCase from native state) per the existing pattern in mechanics-panel.js.
+function _orFlowLabel() {
+  const phases = (typeof state !== 'undefined' && state.phases) || [];
+  if (!phases.length) return 'OR';
+  const counts = phases
+    .map(p => Number(p && (p.operating_rounds != null ? p.operating_rounds : p.operatingRounds)))
+    .filter(n => Number.isFinite(n) && n > 0);
+  if (!counts.length) return 'OR';
+  const min = Math.min.apply(null, counts);
+  const max = Math.max.apply(null, counts);
+  if (max <= 1) return 'OR';
+  if (min === max) return `OR×${max}`;
+  return `OR×${min}–${max}`;
 }
 
 // Listener handlers — attached by mechanics-panel.js after each renderRight,
@@ -1223,6 +1403,20 @@ function onRoundsInputChange(e) {
     if (!rounds.merger) return;
     rounds.merger.triggerCondition = rounds.merger.triggerCondition || {};
     rounds.merger.triggerCondition.phases = String(value).trim().split(/\s+/).filter(Boolean);
+  }
+  // <type>.endHook.preset — populate the body textarea with the preset's
+  // template when a preset is picked AND the body is currently empty. Don't
+  // overwrite typed content; user can clear the textarea first if they want
+  // to switch presets destructively.
+  else if (segs.length === 3 && segs[1] === 'endHook' && segs[2] === 'preset') {
+    const slot = _ensureRoundSlot(segs[0]);
+    if (!slot) return;
+    slot.endHook = slot.endHook || { name: '', body: '', preset: '' };
+    slot.endHook.preset = value || '';
+    const preset = _findPresetById(value);
+    if (preset && !slot.endHook.body.trim()) {
+      slot.endHook.body = preset.body;
+    }
   }
   // ── Generic walker for everything else ───────────────────────────────────
   else {
