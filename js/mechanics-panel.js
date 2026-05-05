@@ -525,6 +525,115 @@ function validateHomeTokenTiming() {
   });
   return errors;
 }
+// ---------------------------------------------------------------------------
+// Export-coherence validator helpers — called by validateRoundCoherence() in
+// rounds-panel.js.  Each returns [{severity:'error'|'warn', code:'Cxx', message}].
+// Source: EXPORT_COHERENCE.md §3.1 + §4.
+// ---------------------------------------------------------------------------
+
+// Known engine round classes and their user-settable constructor opts.
+// validOpts: [] = no user-settable opts; null = unconstrained (Merger, Base).
+// round_num on Operating is auto-injected by the factory — users must not set it.
+const _ENGINE_ROUND_CLASSES = {
+  'Engine::Round::Auction':   { validOpts: [] },
+  'Engine::Round::Choices':   { validOpts: [] },
+  'Engine::Round::Draft':     { validOpts: ['reverse_order', 'snake_order', 'rotating_order'] },
+  'Engine::Round::Stock':     { validOpts: [] },
+  'Engine::Round::Operating': { validOpts: [] },
+  'Engine::Round::Merger':    { validOpts: null },  // varies per game
+  'Engine::Round::Base':      { validOpts: null },  // advanced — no constraint
+};
+
+// C1 + C4 checks.
+function _validateRoundClass(slot) {
+  const errors = [];
+  if (!slot) return errors;
+  const cls = slot.class || null;
+  if (cls === null) return errors;   // null class is allowed (C1 passes)
+
+  const entry = _ENGINE_ROUND_CLASSES[cls];
+  if (!entry) {
+    // C1 — class not in the controlled list
+    errors.push({
+      severity: 'error', code: 'C1',
+      message: `"${cls}" is not a recognised engine round class. ` +
+               `Expected one of: ${Object.keys(_ENGINE_ROUND_CLASSES).join(', ')}.`,
+    });
+    return errors;  // can't validate opts without a known entry
+  }
+
+  // C4 — opts key validation (null validOpts = unconstrained)
+  if (entry.validOpts !== null) {
+    const opts = slot.opts || {};
+    Object.keys(opts).forEach(k => {
+      if (!entry.validOpts.includes(k)) {
+        const hint = entry.validOpts.length
+          ? `Valid opts for ${cls}: ${entry.validOpts.join(', ')}.`
+          : cls === 'Engine::Round::Operating'
+            ? `${cls} takes no user-settable opts. round_num is auto-injected by the factory.`
+            : `${cls} takes no constructor opts.`;
+        errors.push({ severity: 'warn', code: 'C4', message: `Unknown opt "${k}" for ${cls}. ${hint}` });
+      }
+    });
+  }
+  return errors;
+}
+
+// C3 checks.
+// roundType: 'initial' | 'stock' | 'operating' | 'merger'
+// For 'operating': endHook body emits as def or_round_finished on the game class —
+// no subclass is generated, so endHook.name is not applicable.
+function _validateEndHook(slot, roundType) {
+  const errors = [];
+  if (!slot || !slot.endHook) return errors;
+
+  const hook    = slot.endHook;
+  const hasBody = typeof hook.body === 'string' && hook.body.trim().length > 0;
+  const hasName = typeof hook.name === 'string' && hook.name.trim().length > 0;
+
+  if (roundType === 'operating') {
+    // OR tab: body → def or_round_finished on game class; no subclass emitted
+    if (hasName) {
+      errors.push({
+        severity: 'warn', code: 'C3',
+        message: 'endHook.name is not applicable for the Operating round. ' +
+                 'The body emits as def or_round_finished on the game class (not a subclass). ' +
+                 'The name will be ignored on export.',
+      });
+    }
+    if (!hasBody) {
+      errors.push({
+        severity: 'warn', code: 'C3',
+        message: 'endHook is set but body is empty. Add Ruby body or remove the endHook.',
+      });
+    }
+    return errors;
+  }
+
+  // Stock / Initial / Merger: body requires a valid name; name without body is a no-op
+  if (hasBody && !hasName) {
+    errors.push({
+      severity: 'error', code: 'C3',
+      message: 'endHook.name must be set when body is non-empty. No subclass will be emitted without a name.',
+    });
+  }
+  if (hasName && !/^[A-Z][A-Za-z0-9]*$/.test(hook.name.trim())) {
+    errors.push({
+      severity: 'error', code: 'C3',
+      message: `endHook.name "${hook.name}" is not a valid Ruby class name. Must match /^[A-Z][A-Za-z0-9]*$/.`,
+    });
+  }
+  if (!hasBody) {
+    errors.push({
+      severity: 'warn', code: 'C3',
+      message: hasName
+        ? `endHook.name "${hook.name}" is set but body is empty — no subclass will be emitted.`
+        : 'endHook is set but body is empty. Add Ruby body or remove the endHook.',
+    });
+  }
+  return errors;
+}
+
 function runAllNets() {
   const all = [];
   STRUCTURAL_NETS.forEach(net => all.push(...net.validate()));
